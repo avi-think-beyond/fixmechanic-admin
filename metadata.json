@@ -1,0 +1,6 @@
+{
+  "name": "FixMechanic Admin",
+  "description": "Backend architecture, Cloud Functions, Firestore security rules, and Admin Operations Dashboard for FixMechanic emergency roadside assistance.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
