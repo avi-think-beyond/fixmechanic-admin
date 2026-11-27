@@ -35,15 +35,8 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.assertCallerRole = assertCallerRole;
 exports.syncUserClaims = syncUserClaims;
-/**
- * Auth and Trusted Role Enforcement
- * Enforces server-side authority for CUSTOMER, MECHANIC, and ADMIN roles.
- */
 const functions = __importStar(require("firebase-functions"));
 const admin = __importStar(require("firebase-admin"));
-/**
- * Verify caller authentication and retrieve authoritative role from Firestore & Custom Claims
- */
 async function assertCallerRole(context, db, allowedRoles) {
     if (!context.auth || !context.auth.uid) {
         throw new functions.https.HttpsError("unauthenticated", "Authentication required for this operation.");
@@ -57,7 +50,7 @@ async function assertCallerRole(context, db, allowedRoles) {
     if (userData?.disabled) {
         throw new functions.https.HttpsError("permission-denied", "User account is suspended or disabled.");
     }
-    const role = userData?.role;
+    const role = String(userData?.role || "").toUpperCase();
     if (!allowedRoles.includes(role)) {
         throw new functions.https.HttpsError("permission-denied", `Access denied. Role ${role} is not authorized for this operation.`);
     }
@@ -70,12 +63,9 @@ async function assertCallerRole(context, db, allowedRoles) {
         uid,
         role,
         approvalStatus,
-        email: context.auth.token.email || userData?.email,
+        email: context.auth.token?.email || userData?.email,
     };
 }
-/**
- * Sync custom user claims when user record role is modified or set
- */
 async function syncUserClaims(uid, role, approvalStatus) {
     const claims = {
         role,

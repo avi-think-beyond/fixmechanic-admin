@@ -7,6 +7,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -16,12 +17,15 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.FirestoreAdminRepository
+import com.example.model.AdminSessionState
 import com.example.model.MechanicApprovalStatus
 import com.example.model.ServiceRequestStatus
 import com.example.ui.*
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.FixMechanicAdminTheme
 import com.example.viewmodel.AdminViewModel
+import com.example.viewmodel.AdminViewModelFactory
 
 enum class AdminTab(val title: String, val icon: ImageVector, val tag: String) {
   OVERVIEW("Overview", Icons.Default.Dashboard, "tab_overview"),
@@ -32,17 +36,19 @@ enum class AdminTab(val title: String, val icon: ImageVector, val tag: String) {
 }
 
 class MainActivity : ComponentActivity() {
-  private val viewModel: AdminViewModel by viewModels()
+  private val viewModel: AdminViewModel by viewModels {
+    AdminViewModelFactory(FirestoreAdminRepository(applicationContext))
+  }
 
   @OptIn(ExperimentalMaterial3Api::class)
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
-
     setContent {
       FixMechanicAdminTheme {
         var currentTab by remember { mutableStateOf(AdminTab.OVERVIEW) }
         val snackbarHostState = remember { SnackbarHostState() }
+        val sessionState by viewModel.sessionState.collectAsState()
         val statusMsg by viewModel.statusMessage.collectAsState()
         val mechanics by viewModel.mechanics.collectAsState()
         val requests by viewModel.requests.collectAsState()
@@ -67,85 +73,105 @@ class MainActivity : ComponentActivity() {
           }
         }
 
-        Scaffold(
-          topBar = {
-            TopAppBar(
-              title = {
-                Column {
-                  Text(
-                    text = "FixMechanic Admin",
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 18.sp
-                  )
-                  Text(
-                    text = "Gurugram Sector 29 Pilot Zone",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                  )
-                }
-              },
-              actions = {
-                Badge(
-                  containerColor = AmberPrimary,
-                  modifier = Modifier.padding(end = 12.dp)
-                ) {
-                  Text("OPS ADMIN", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
-              },
-              colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.surface
-              )
+        if (sessionState !is AdminSessionState.Authenticated) {
+          Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            contentWindowInsets = WindowInsets.systemBars
+          ) { innerPadding ->
+            AdminAuthScreen(
+              sessionState = sessionState,
+              onEmailSignIn = { email, pass -> viewModel.signInWithEmail(email, pass) },
+              onGoogleTokenReceived = { token -> viewModel.signInWithGoogleToken(token) },
+              onSignOut = { viewModel.signOut() },
+              modifier = Modifier.padding(innerPadding)
             )
-          },
-          bottomBar = {
-            NavigationBar(
-              containerColor = MaterialTheme.colorScheme.surface,
-              tonalElevation = 6.dp,
-              modifier = Modifier.testTag("admin_bottom_nav")
-            ) {
-              AdminTab.values().forEach { tab ->
-                val badgeCount = when (tab) {
-                  AdminTab.FLEET -> pendingCount
-                  AdminTab.REQUESTS -> activeCount
-                  else -> 0
-                }
-
-                NavigationBarItem(
-                  selected = currentTab == tab,
-                  onClick = { currentTab = tab },
-                  icon = {
-                    BadgedBox(badge = {
-                      if (badgeCount > 0) {
-                        Badge { Text(badgeCount.toString()) }
-                      }
-                    }) {
-                      Icon(imageVector = tab.icon, contentDescription = tab.title)
-                    }
-                  },
-                  label = { Text(tab.title) },
-                  modifier = Modifier.testTag(tab.tag)
+          }
+        } else {
+          Scaffold(
+            topBar = {
+              TopAppBar(
+                title = {
+                  Column {
+                    Text(
+                      text = "FixMechanic Admin",
+                      fontWeight = FontWeight.ExtraBold,
+                      fontSize = 18.sp
+                    )
+                    Text(
+                      text = (sessionState as AdminSessionState.Authenticated).email,
+                      fontSize = 11.sp,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                  }
+                },
+                actions = {
+                  Badge(
+                    containerColor = AmberPrimary,
+                    modifier = Modifier.padding(end = 6.dp)
+                  ) {
+                    Text("OPS ADMIN", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                  }
+                  IconButton(
+                    onClick = { viewModel.signOut() },
+                    modifier = Modifier.testTag("admin_signout_button")
+                  ) {
+                    Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Sign Out")
+                  }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                  containerColor = MaterialTheme.colorScheme.surface
                 )
-              }
-            }
-          },
-          snackbarHost = { SnackbarHost(snackbarHostState) },
-          contentWindowInsets = WindowInsets.systemBars
-        ) { innerPadding ->
-          Box(
-            modifier = Modifier
-              .fillMaxSize()
-              .padding(innerPadding)
-          ) {
-            when (currentTab) {
-              AdminTab.OVERVIEW -> AdminOverviewScreen(
-                viewModel = viewModel,
-                onNavigateToFleet = { currentTab = AdminTab.FLEET },
-                onNavigateToRequests = { currentTab = AdminTab.REQUESTS }
               )
-              AdminTab.FLEET -> MechanicFleetScreen(viewModel = viewModel)
-              AdminTab.REQUESTS -> EmergencyRequestsScreen(viewModel = viewModel)
-              AdminTab.CONFIG -> DispatchConfigScreen(viewModel = viewModel)
-              AdminTab.AUDIT -> AuditLogScreen(viewModel = viewModel)
+            },
+            bottomBar = {
+              NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
+                modifier = Modifier.testTag("admin_bottom_nav")
+              ) {
+                AdminTab.values().forEach { tab ->
+                  val badgeCount = when (tab) {
+                    AdminTab.FLEET -> pendingCount
+                    AdminTab.REQUESTS -> activeCount
+                    else -> 0
+                  }
+                  NavigationBarItem(
+                    selected = currentTab == tab,
+                    onClick = { currentTab = tab },
+                    icon = {
+                      BadgedBox(badge = {
+                        if (badgeCount > 0) {
+                          Badge { Text(badgeCount.toString()) }
+                        }
+                      }) {
+                        Icon(imageVector = tab.icon, contentDescription = tab.title)
+                      }
+                    },
+                    label = { Text(tab.title) },
+                    modifier = Modifier.testTag(tab.tag)
+                  )
+                }
+              }
+            },
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            contentWindowInsets = WindowInsets.systemBars
+          ) { innerPadding ->
+            Box(
+              modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+            ) {
+              when (currentTab) {
+                AdminTab.OVERVIEW -> AdminOverviewScreen(
+                  viewModel = viewModel,
+                  onNavigateToFleet = { currentTab = AdminTab.FLEET },
+                  onNavigateToRequests = { currentTab = AdminTab.REQUESTS }
+                )
+                AdminTab.FLEET -> MechanicFleetScreen(viewModel = viewModel)
+                AdminTab.REQUESTS -> EmergencyRequestsScreen(viewModel = viewModel)
+                AdminTab.CONFIG -> DispatchConfigScreen(viewModel = viewModel)
+                AdminTab.AUDIT -> AuditLogScreen(viewModel = viewModel)
+              }
             }
           }
         }

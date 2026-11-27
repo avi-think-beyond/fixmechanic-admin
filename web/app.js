@@ -1,176 +1,17 @@
 /**
  * FixMechanic Admin Operations Console
- * Client Controller for Fleet Management, Incident Dispatch, CSV Batch Import,
- * and Authoritative State Machine Audits.
+ * Live Firestore (`(default)`) + Firebase Auth + Spark HTTP Callable Backend client.
+ * Never falls back to silent hardcoded mock arrays.
  */
 
-// Initial Seed Data for Gurugram Sector 29 Pilot Zone
-let mechanicsFleet = [
-  {
-    mechanicId: "mech_101",
-    name: "Rajesh Sharma",
-    phone: "9810123401",
-    email: "rajesh.sharma@example.com",
-    approvalStatus: "APPROVED",
-    isOnline: true,
-    isBusy: false,
-    activeJobId: null,
-    vehicleTypes: ["TWO_WHEELER", "FOUR_WHEELER_CAR"],
-    serviceCategories: ["FLAT_TYRE", "BATTERY_JUMPSTART", "MINOR_MECHANICAL"],
-    currentLocation: { lat: 28.4682, lng: 77.0617, address: "Sector 29 Gurugram", updatedAt: Date.now() },
-    ratingAverage: 4.8,
-    ratingCount: 34,
-  },
-  {
-    mechanicId: "mech_102",
-    name: "Amit Kumar",
-    phone: "9810123402",
-    email: "amit.kumar@example.com",
-    approvalStatus: "PENDING",
-    isOnline: false,
-    isBusy: false,
-    activeJobId: null,
-    vehicleTypes: ["TWO_WHEELER", "FOUR_WHEELER_CAR", "EV_TWO_WHEELER"],
-    serviceCategories: ["FLAT_TYRE", "BATTERY_JUMPSTART", "LOCKOUT"],
-    currentLocation: { lat: 28.4725, lng: 77.0850, address: "DLF Phase 4 Gurugram", updatedAt: Date.now() },
-    ratingAverage: 5.0,
-    ratingCount: 0,
-  },
-  {
-    mechanicId: "mech_103",
-    name: "Vikas Yadav",
-    phone: "9810123403",
-    email: "vikas.yadav@example.com",
-    approvalStatus: "APPROVED",
-    isOnline: true,
-    isBusy: true,
-    activeJobId: "REQ-901",
-    vehicleTypes: ["FOUR_WHEELER_CAR", "COMMERCIAL_LIGHT"],
-    serviceCategories: ["TOWING", "BATTERY_JUMPSTART"],
-    currentLocation: { lat: 28.4231, lng: 77.0428, address: "Sohna Road Gurugram", updatedAt: Date.now() },
-    ratingAverage: 4.9,
-    ratingCount: 52,
-  },
-  {
-    mechanicId: "mech_104",
-    name: "Sunil Verma",
-    phone: "9810123404",
-    email: "sunil.verma@example.com",
-    approvalStatus: "PENDING",
-    isOnline: false,
-    isBusy: false,
-    activeJobId: null,
-    vehicleTypes: ["TWO_WHEELER", "EV_TWO_WHEELER"],
-    serviceCategories: ["FLAT_TYRE", "BATTERY_JUMPSTART", "FUEL_DELIVERY"],
-    currentLocation: { lat: 28.4750, lng: 77.0392, address: "Sector 14 Gurugram", updatedAt: Date.now() },
-    ratingAverage: 5.0,
-    ratingCount: 0,
-  },
-  {
-    mechanicId: "mech_105",
-    name: "Manoj Saini",
-    phone: "9810123405",
-    email: "manoj.saini@example.com",
-    approvalStatus: "SUSPENDED",
-    rejectionReason: "Repeated customer no-shows under investigation",
-    isOnline: false,
-    isBusy: false,
-    activeJobId: null,
-    vehicleTypes: ["FOUR_WHEELER_CAR", "EV_FOUR_WHEELER"],
-    serviceCategories: ["BATTERY_JUMPSTART", "LOCKOUT"],
-    currentLocation: { lat: 28.4520, lng: 77.0980, address: "Golf Course Road", updatedAt: Date.now() },
-    ratingAverage: 3.2,
-    ratingCount: 18,
-  },
-  {
-    mechanicId: "mech_106",
-    name: "Deepak Singh",
-    phone: "9810123406",
-    email: "deepak.singh@example.com",
-    approvalStatus: "APPROVED",
-    isOnline: true,
-    isBusy: false,
-    activeJobId: null,
-    vehicleTypes: ["TWO_WHEELER", "FOUR_WHEELER_CAR"],
-    serviceCategories: ["FLAT_TYRE", "TOWING", "MINOR_MECHANICAL"],
-    currentLocation: { lat: 28.4950, lng: 77.0890, address: "Cyber City Gurugram", updatedAt: Date.now() },
-    ratingAverage: 4.7,
-    ratingCount: 41,
-  }
-];
+let firebaseApp = null;
+let auth = null;
+let db = null;
+let currentUser = null;
 
-let serviceRequests = [
-  {
-    id: "REQ-901",
-    customerId: "cust_301",
-    customerName: "Ananya Gupta",
-    customerPhone: "9811223344",
-    vehicleType: "FOUR_WHEELER_CAR",
-    vehicleRegNumber: "HR26-DK-4819",
-    serviceCategory: "BATTERY_JUMPSTART",
-    status: "EN_ROUTE",
-    assignedMechanicId: "mech_103",
-    assignedMechanicName: "Vikas Yadav",
-    dispatchBatch: 1,
-    searchRadiusKm: 5.0,
-    location: { address: "Near Signature Tower, South City 1", lat: 28.4610, lng: 77.0530 },
-    createdAt: Date.now() - 15 * 60 * 1000,
-    timeline: [
-      { from: "REQUESTED", to: "SEARCHING", time: Date.now() - 15 * 60 * 1000, actor: "CUSTOMER" },
-      { from: "SEARCHING", to: "ASSIGNED", time: Date.now() - 14 * 60 * 1000, actor: "SYSTEM (Atomic Lock)" },
-      { from: "ASSIGNED", to: "ACCEPTED", time: Date.now() - 13 * 60 * 1000, actor: "MECHANIC" },
-      { from: "ACCEPTED", to: "EN_ROUTE", time: Date.now() - 10 * 60 * 1000, actor: "MECHANIC" },
-    ]
-  },
-  {
-    id: "REQ-902",
-    customerId: "cust_302",
-    customerName: "Rahul Sen",
-    customerPhone: "9899112233",
-    vehicleType: "TWO_WHEELER",
-    vehicleRegNumber: "DL03-EM-9921",
-    serviceCategory: "FLAT_TYRE",
-    status: "COMPLETED",
-    assignedMechanicId: "mech_101",
-    assignedMechanicName: "Rajesh Sharma",
-    dispatchBatch: 1,
-    searchRadiusKm: 5.0,
-    location: { address: "HUDA Metro Station Gate 2", lat: 28.4590, lng: 77.0720 },
-    createdAt: Date.now() - 65 * 60 * 1000,
-    completedAt: Date.now() - 20 * 60 * 1000,
-    timeline: [
-      { from: "REQUESTED", to: "SEARCHING", time: Date.now() - 65 * 60 * 1000, actor: "CUSTOMER" },
-      { from: "SEARCHING", to: "ASSIGNED", time: Date.now() - 64 * 60 * 1000, actor: "SYSTEM" },
-      { from: "ASSIGNED", to: "ACCEPTED", time: Date.now() - 63 * 60 * 1000, actor: "MECHANIC" },
-      { from: "ACCEPTED", to: "EN_ROUTE", time: Date.now() - 60 * 60 * 1000, actor: "MECHANIC" },
-      { from: "EN_ROUTE", to: "ARRIVED", time: Date.now() - 45 * 60 * 1000, actor: "MECHANIC" },
-      { from: "ARRIVED", to: "IN_PROGRESS", time: Date.now() - 42 * 60 * 1000, actor: "MECHANIC" },
-      { from: "IN_PROGRESS", to: "COMPLETED", time: Date.now() - 20 * 60 * 1000, actor: "MECHANIC" },
-    ]
-  }
-];
-
-let auditLogs = [
-  {
-    id: "LOG_001",
-    action: "SYSTEM_INITIALIZATION",
-    admin: "SYSTEM",
-    targetType: "SYSTEM_CONFIG",
-    targetId: "pilot_gurugram",
-    details: "Sector 29 Gurugram pilot zone online with 5km default radius.",
-    timestamp: Date.now() - 2 * 3600 * 1000,
-  },
-  {
-    id: "LOG_002",
-    action: "MECHANIC_STATUS_SUSPENDED",
-    admin: "admin@fixmechanic.in",
-    targetType: "MECHANIC",
-    targetId: "mech_105",
-    details: "Manoj Saini suspended due to 3 unconfirmed roadside dispatch cancellations.",
-    timestamp: Date.now() - 1 * 3600 * 1000,
-  }
-];
-
+let mechanicsFleet = [];
+let serviceRequests = [];
+let auditLogs = [];
 let appConfig = {
   defaultSearchRadiusKm: 5.0,
   maxSearchRadiusKm: 15.0,
@@ -183,9 +24,9 @@ let appConfig = {
 
 let activeMechanicFilter = "ALL";
 let activeRequestFilter = "ALL";
-let stagedCsvValidRows = [];
+let stagedCsvRows = [];
+let unsubscribers = [];
 
-// DOM Elements
 document.addEventListener("DOMContentLoaded", () => {
   initNavigation();
   initMechanicsView();
@@ -193,21 +34,230 @@ document.addEventListener("DOMContentLoaded", () => {
   initCsvImporter();
   initConfigForm();
   initSimulation();
+  initAuthAndConnection();
   renderAll();
 });
+
+function initAuthAndConnection() {
+  const cfg = window.FIXMECHANIC_CFG;
+  document.getElementById("cfgSparkUrl").value = cfg.sparkBackendUrl || "http://127.0.0.1:5055";
+  document.getElementById("cfgWebApiKey").value = cfg.firebase.apiKey || "";
+  document.getElementById("cfgUseEmulators").checked = !!cfg.useEmulators;
+
+  document.getElementById("btnSaveConnectionCfg").addEventListener("click", () => {
+    const nextCfg = {
+      sparkBackendUrl: document.getElementById("cfgSparkUrl").value.trim() || "http://127.0.0.1:5055",
+      apiKey: document.getElementById("cfgWebApiKey").value.trim(),
+      useEmulators: document.getElementById("cfgUseEmulators").checked,
+    };
+    localStorage.setItem("fixmechanic_web_cfg", JSON.stringify(nextCfg));
+    window.location.reload();
+  });
+
+  if (!window.firebase || !cfg.firebase.apiKey) {
+    setAuthError("Firebase Web API key is not configured for production hosting, or enable local emulators.");
+    updateConnPill(false, "Config Needed");
+    return;
+  }
+
+  firebaseApp = firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg.firebase);
+  auth = firebase.auth();
+  db = firebase.firestore();
+
+  if (cfg.useEmulators) {
+    auth.useEmulator(cfg.authEmulatorUrl);
+    db.useEmulator(cfg.firestoreEmulatorHost, cfg.firestoreEmulatorPort);
+  }
+
+  checkBackendHealth();
+
+  document.getElementById("adminLoginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    clearAuthError();
+    const email = document.getElementById("loginEmail").value.trim();
+    const password = document.getElementById("loginPassword").value;
+    try {
+      await auth.signInWithEmailAndPassword(email, password);
+    } catch (err) {
+      setAuthError(err.message || "Email sign-in failed.");
+    }
+  });
+
+  document.getElementById("btnGoogleLogin").addEventListener("click", async () => {
+    clearAuthError();
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await auth.signInWithPopup(provider);
+    } catch (err) {
+      setAuthError(err.message || "Google sign-in failed.");
+    }
+  });
+
+  document.getElementById("btnAdminSignOut").addEventListener("click", async () => {
+    clearListeners();
+    if (auth) await auth.signOut();
+  });
+
+  auth.onAuthStateChanged(async (user) => {
+    clearListeners();
+    if (!user) {
+      currentUser = null;
+      mechanicsFleet = [];
+      serviceRequests = [];
+      auditLogs = [];
+      document.getElementById("authOverlay").classList.remove("hidden");
+      document.getElementById("adminEmailLabel").textContent = "Signed Out";
+      renderAll();
+      return;
+    }
+
+    try {
+      const userSnap = await db.collection("users").doc(user.uid).get();
+      const tokenRes = await user.getIdTokenResult();
+      const role = String(userSnap.data()?.role || tokenRes.claims?.role || "").toUpperCase();
+      if (role !== "ADMIN" && tokenRes.claims?.admin !== true) {
+        await auth.signOut();
+        setAuthError("Access denied: this account does not have ADMIN role privileges.");
+        return;
+      }
+
+      currentUser = user;
+      document.getElementById("authOverlay").classList.add("hidden");
+      document.getElementById("adminDisplayName").textContent = user.displayName || "Operations Admin";
+      document.getElementById("adminEmailLabel").textContent = user.email || user.uid;
+      document.getElementById("adminAvatarInitial").textContent = (user.email || "A")[0].toUpperCase();
+      subscribeLiveCollections();
+    } catch (err) {
+      setAuthError(`Failed verifying admin role: ${err.message}`);
+    }
+  });
+}
+
+async function checkBackendHealth() {
+  const sparkUrl = window.FIXMECHANIC_CFG.sparkBackendUrl;
+  try {
+    const res = await fetch(`${sparkUrl}/health`);
+    if (res.ok) {
+      updateConnPill(true, "Live Spark + Firestore");
+      return;
+    }
+  } catch (_) {}
+  updateConnPill(false, "Spark Backend Offline");
+}
+
+function updateConnPill(online, label) {
+  const pill = document.getElementById("backendConnPill");
+  if (!pill) return;
+  pill.textContent = label;
+  pill.classList.toggle("offline", !online);
+}
+
+function setAuthError(msg) {
+  const el = document.getElementById("authErrorBanner");
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add("visible");
+}
+
+function clearAuthError() {
+  const el = document.getElementById("authErrorBanner");
+  if (!el) return;
+  el.textContent = "";
+  el.classList.remove("visible");
+}
+
+function clearListeners() {
+  unsubscribers.forEach((u) => {
+    try { u(); } catch (_) {}
+  });
+  unsubscribers = [];
+}
+
+function subscribeLiveCollections() {
+  unsubscribers.push(
+    db.collection("mechanicProfiles").onSnapshot(
+      (snap) => {
+        mechanicsFleet = snap.docs.map((doc) => ({ mechanicId: doc.id, ...doc.data() }));
+        renderAll();
+      },
+      (err) => showToast(`Mechanic listener error: ${err.message}`)
+    )
+  );
+
+  unsubscribers.push(
+    db.collection("serviceRequests").orderBy("createdAt", "desc").limit(100).onSnapshot(
+      (snap) => {
+        serviceRequests = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+        renderAll();
+      },
+      (err) => showToast(`Requests listener error: ${err.message}`)
+    )
+  );
+
+  unsubscribers.push(
+    db.collection("adminAuditLogs").orderBy("timestamp", "desc").limit(50).onSnapshot(
+      (snap) => {
+        auditLogs = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+        renderAll();
+      },
+      (err) => showToast(`Audit log listener error: ${err.message}`)
+    )
+  );
+
+  unsubscribers.push(
+    db.collection("applicationConfig").doc("current").onSnapshot((doc) => {
+      if (doc.exists) {
+        appConfig = { ...appConfig, ...doc.data() };
+        syncConfigInputs();
+        renderAll();
+      }
+    })
+  );
+}
+
+function syncConfigInputs() {
+  document.getElementById("cfgSearchRadius").value = appConfig.defaultSearchRadiusKm ?? 5;
+  document.getElementById("cfgMaxRadius").value = appConfig.maxSearchRadiusKm ?? 15;
+  document.getElementById("cfgBatchSize").value = appConfig.initialOfferBatchSize ?? 3;
+  document.getElementById("cfgOfferTimeout").value = appConfig.offerTimeoutSeconds ?? 45;
+  document.getElementById("cfgMaxRetries").value = appConfig.maxMechanicDispatchAttempts ?? 3;
+  document.getElementById("cfgStaleness").value = appConfig.maxMechanicLocationStalenessMinutes ?? 20;
+  document.getElementById("cfgLocalityName").value = appConfig.localityName || "Gurugram (Sector 29 Pilot Zone)";
+  const locEl = document.getElementById("sidebarLocalityName");
+  if (locEl) locEl.textContent = appConfig.localityName || "Gurugram (Sector 29 Hub)";
+}
+
+async function callSparkBackend(functionName, payload) {
+  if (!currentUser) {
+    throw new Error("Admin authentication required.");
+  }
+  const token = await currentUser.getIdToken();
+  const baseUrl = window.FIXMECHANIC_CFG.sparkBackendUrl.replace(/\/+$/, "");
+  const res = await fetch(`${baseUrl}/${functionName}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ data: payload }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(json?.error?.message || `Backend error (${res.status})`);
+  }
+  return json.result;
+}
 
 function initNavigation() {
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("active"));
       document.querySelectorAll(".tab-pane").forEach((p) => p.classList.remove("active"));
-
       btn.classList.add("active");
       const tabId = btn.getAttribute("data-tab");
       const pane = document.getElementById(`pane-${tabId}`);
       if (pane) pane.classList.add("active");
 
-      // Update Header title
       const titles = {
         overview: ["Operations Overview", "Real-time dispatch telemetry, mechanic verification, and roadside incident status."],
         mechanics: ["Mechanic Fleet Directory", "Verify onboarding credentials, approval states, and service coverage."],
@@ -223,8 +273,9 @@ function initNavigation() {
   });
 
   document.getElementById("btnRefreshData").addEventListener("click", () => {
+    checkBackendHealth();
     renderAll();
-    showToast("Data synchronized with backend records.");
+    showToast("Synchronized with live Firestore & Spark backend.");
   });
 }
 
@@ -241,10 +292,13 @@ function renderMetrics() {
   const onlineMechs = mechanicsFleet.filter((m) => m.isOnline && m.approvalStatus === "APPROVED").length;
   const pendingMechs = mechanicsFleet.filter((m) => m.approvalStatus === "PENDING").length;
 
-  const activeReqs = serviceRequests.filter((r) => ["REQUESTED", "SEARCHING", "ASSIGNED", "ACCEPTED", "EN_ROUTE", "ARRIVED", "IN_PROGRESS"].includes(r.status)).length;
+  const activeStatuses = ["REQUESTED", "SEARCHING", "ASSIGNED", "ACCEPTED", "EN_ROUTE", "ARRIVED", "IN_PROGRESS"];
+  const activeReqs = serviceRequests.filter((r) => activeStatuses.includes(r.status)).length;
   const completedReqs = serviceRequests.filter((r) => r.status === "COMPLETED").length;
   const cancelledReqs = serviceRequests.filter((r) => r.status === "CANCELLED").length;
-  const failedDispatches = auditLogs.filter((l) => l.action.includes("EXHAUSTED")).length;
+  const failedDispatches =
+    serviceRequests.filter((r) => r.status === "EXPIRED").length ||
+    auditLogs.filter((l) => (l.action || "").includes("EXHAUSTED")).length;
 
   document.getElementById("kpiTotalMechanics").textContent = totalMechs;
   document.getElementById("kpiMechanicsSub").textContent = `${onlineMechs} Online & Ready`;
@@ -258,7 +312,6 @@ function renderMetrics() {
   document.getElementById("badgePendingCount").textContent = pendingMechs;
   document.getElementById("badgeActiveReqCount").textContent = activeReqs;
 
-  // Counts for tabs
   document.getElementById("countAllMechs").textContent = totalMechs;
   document.getElementById("countPendingMechs").textContent = pendingMechs;
   document.getElementById("countApprovedMechs").textContent = mechanicsFleet.filter((m) => m.approvalStatus === "APPROVED").length;
@@ -270,24 +323,17 @@ function renderRadar() {
   const container = document.getElementById("radarMechanicDots");
   if (!container) return;
   container.innerHTML = "";
-
   mechanicsFleet.slice(0, 15).forEach((m, idx) => {
     const dot = document.createElement("span");
-    dot.className = "dot";
-    let colorClass = "green";
-    if (m.approvalStatus !== "APPROVED") colorClass = "gray";
-    else if (m.isBusy) colorClass = "orange";
+    let colorClass = "gray";
+    if (m.approvalStatus === "APPROVED" && m.isBusy) colorClass = "orange";
+    else if (m.approvalStatus === "APPROVED" && m.isOnline) colorClass = "green";
     dot.className = `dot ${colorClass}`;
-
-    // Place randomly on radar
     const angle = (idx / 15) * 2 * Math.PI;
     const r = 35 + (idx % 3) * 35;
-    const x = 50 + (Math.cos(angle) * r) / 2.5;
-    const y = 50 + (Math.sin(angle) * r) / 2.5;
-
     dot.style.position = "absolute";
-    dot.style.left = `${x}%`;
-    dot.style.top = `${y}%`;
+    dot.style.left = `${50 + (Math.cos(angle) * r) / 2.5}%`;
+    dot.style.top = `${50 + (Math.sin(angle) * r) / 2.5}%`;
     dot.title = `${m.name} (${m.approvalStatus})`;
     container.appendChild(dot);
   });
@@ -303,9 +349,7 @@ function initMechanicsView() {
     });
   });
 
-  document.getElementById("mechanicSearchInput").addEventListener("input", () => {
-    renderMechanicsTable();
-  });
+  document.getElementById("mechanicSearchInput").addEventListener("input", renderMechanicsTable);
 }
 
 function renderMechanicsTable() {
@@ -314,26 +358,24 @@ function renderMechanicsTable() {
   tbody.innerHTML = "";
 
   const filtered = mechanicsFleet.filter((m) => {
-    if (activeMechanicFilter !== "ALL" && m.approvalStatus !== activeMechanicFilter) {
-      return false;
-    }
+    if (activeMechanicFilter !== "ALL" && m.approvalStatus !== activeMechanicFilter) return false;
     if (query) {
-      const matchName = m.name.toLowerCase().includes(query);
-      const matchPhone = m.phone.includes(query);
-      const matchLoc = (m.currentLocation?.address || "").toLowerCase().includes(query);
-      return matchName || matchPhone || matchLoc;
+      return (
+        (m.name || "").toLowerCase().includes(query) ||
+        (m.phone || "").includes(query) ||
+        (m.currentLocation?.address || "").toLowerCase().includes(query)
+      );
     }
     return true;
   });
 
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">No mechanics found matching current criteria.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">No live mechanics found matching criteria.</td></tr>`;
     return;
   }
 
   filtered.forEach((m) => {
     const tr = document.createElement("tr");
-
     let statusBadge = `<span class="badge badge-warning">PENDING</span>`;
     if (m.approvalStatus === "APPROVED") statusBadge = `<span class="badge badge-success">APPROVED</span>`;
     else if (m.approvalStatus === "SUSPENDED") statusBadge = `<span class="badge badge-danger">SUSPENDED</span>`;
@@ -341,10 +383,7 @@ function renderMechanicsTable() {
 
     let availBadge = `<span class="badge badge-gray">OFFLINE</span>`;
     if (m.isOnline && !m.isBusy) availBadge = `<span class="badge badge-success">READY</span>`;
-    else if (m.isOnline && m.isBusy) availBadge = `<span class="badge badge-warning">BUSY (#${m.activeJobId})</span>`;
-
-    const vTypes = (m.vehicleTypes || []).join(", ");
-    const services = (m.serviceCategories || []).join(", ");
+    else if (m.isOnline && m.isBusy) availBadge = `<span class="badge badge-warning">BUSY (#${escapeHtml(m.activeJobId || "")})</span>`;
 
     tr.innerHTML = `
       <td>
@@ -353,16 +392,16 @@ function renderMechanicsTable() {
       </td>
       <td>${statusBadge}</td>
       <td>${availBadge}</td>
-      <td style="max-width: 140px; font-size: 0.75rem;">${escapeHtml(vTypes)}</td>
-      <td style="max-width: 140px; font-size: 0.75rem;">${escapeHtml(services)}</td>
-      <td>⭐ ${m.ratingAverage || 5.0} <span class="text-muted">(${m.ratingCount || 0})</span></td>
-      <td>${escapeHtml(m.currentLocation?.address || "Gurugram Sector 29")}</td>
+      <td style="max-width: 140px; font-size: 0.75rem;">${escapeHtml((m.vehicleTypes || []).join(", "))}</td>
+      <td style="max-width: 140px; font-size: 0.75rem;">${escapeHtml((m.serviceCategories || []).join(", "))}</td>
+      <td>⭐ ${m.ratingAverage ?? 5.0} <span class="text-muted">(${m.ratingCount ?? 0})</span></td>
+      <td>${escapeHtml(m.currentLocation?.address || "Gurugram")}</td>
       <td>
         <div style="display: flex; gap: 0.35rem;">
-          ${m.approvalStatus === "PENDING" ? `<button class="btn btn-sm btn-primary" onclick="setMechanicStatus('${m.mechanicId}', 'APPROVED')">Approve</button>` : ""}
-          ${m.approvalStatus === "PENDING" ? `<button class="btn btn-sm btn-secondary" onclick="setMechanicStatus('${m.mechanicId}', 'REJECTED')">Reject</button>` : ""}
-          ${m.approvalStatus === "APPROVED" ? `<button class="btn btn-sm btn-outline-danger" onclick="setMechanicStatus('${m.mechanicId}', 'SUSPENDED')">Suspend</button>` : ""}
-          ${m.approvalStatus === "SUSPENDED" ? `<button class="btn btn-sm btn-secondary" onclick="setMechanicStatus('${m.mechanicId}', 'APPROVED')">Re-activate</button>` : ""}
+          ${m.approvalStatus === "PENDING" ? `<button class="btn btn-sm btn-primary" onclick="setMechanicStatus('${escapeHtml(m.mechanicId)}', 'APPROVED')">Approve</button>` : ""}
+          ${m.approvalStatus === "PENDING" ? `<button class="btn btn-sm btn-secondary" onclick="setMechanicStatus('${escapeHtml(m.mechanicId)}', 'REJECTED')">Reject</button>` : ""}
+          ${m.approvalStatus === "APPROVED" ? `<button class="btn btn-sm btn-outline-danger" onclick="setMechanicStatus('${escapeHtml(m.mechanicId)}', 'SUSPENDED')">Suspend</button>` : ""}
+          ${m.approvalStatus === "SUSPENDED" || m.approvalStatus === "REJECTED" ? `<button class="btn btn-sm btn-secondary" onclick="setMechanicStatus('${escapeHtml(m.mechanicId)}', 'APPROVED')">Re-activate</button>` : ""}
         </div>
       </td>
     `;
@@ -370,28 +409,17 @@ function renderMechanicsTable() {
   });
 }
 
-window.setMechanicStatus = function(mechanicId, newStatus) {
-  const mech = mechanicsFleet.find((m) => m.mechanicId === mechanicId);
-  if (!mech) return;
-
-  mech.approvalStatus = newStatus;
-  if (newStatus !== "APPROVED") {
-    mech.isOnline = false;
+window.setMechanicStatus = async function (mechanicId, newStatus) {
+  try {
+    await callSparkBackend("updateMechanicStatus", {
+      mechanicId,
+      targetStatus: newStatus,
+      reason: `Admin set status to ${newStatus} via Web Console`,
+    });
+    showToast(`Mechanic status updated to ${newStatus}.`);
+  } catch (err) {
+    showToast(`Error: ${err.message}`);
   }
-
-  // Audit log entry
-  auditLogs.unshift({
-    id: `LOG_${Date.now()}`,
-    action: `MECHANIC_STATUS_${newStatus}`,
-    admin: "admin@fixmechanic.in",
-    targetType: "MECHANIC",
-    targetId: mechanicId,
-    details: `Admin changed ${mech.name} status to ${newStatus}`,
-    timestamp: Date.now(),
-  });
-
-  renderAll();
-  showToast(`Mechanic ${mech.name} status updated to ${newStatus}.`);
 };
 
 function initRequestsView() {
@@ -404,10 +432,7 @@ function initRequestsView() {
     });
   });
 
-  document.getElementById("requestSearchInput").addEventListener("input", () => {
-    renderRequestsTable();
-  });
-
+  document.getElementById("requestSearchInput").addEventListener("input", renderRequestsTable);
   document.getElementById("btnCloseReqModal").addEventListener("click", () => {
     document.getElementById("requestDetailModal").classList.remove("open");
   });
@@ -418,20 +443,20 @@ function renderRequestsTable() {
   const tbody = document.getElementById("requestsTableBody");
   tbody.innerHTML = "";
 
+  const activeStatuses = ["REQUESTED", "SEARCHING", "ASSIGNED", "ACCEPTED", "EN_ROUTE", "ARRIVED", "IN_PROGRESS"];
   const filtered = serviceRequests.filter((r) => {
-    if (activeRequestFilter === "ACTIVE") {
-      if (!["REQUESTED", "SEARCHING", "ASSIGNED", "ACCEPTED", "EN_ROUTE", "ARRIVED", "IN_PROGRESS"].includes(r.status)) return false;
-    } else if (activeRequestFilter === "COMPLETED" && r.status !== "COMPLETED") {
-      return false;
-    } else if (activeRequestFilter === "CANCELLED" && r.status !== "CANCELLED") {
-      return false;
-    }
+    if (activeRequestFilter === "ACTIVE" && !activeStatuses.includes(r.status)) return false;
+    else if (activeRequestFilter === "COMPLETED" && r.status !== "COMPLETED") return false;
+    else if (activeRequestFilter === "CANCELLED" && r.status !== "CANCELLED") return false;
+    else if (activeRequestFilter === "EXPIRED" && r.status !== "EXPIRED") return false;
 
     if (query) {
-      const matchId = r.id.toLowerCase().includes(query);
-      const matchCust = (r.customerName || "").toLowerCase().includes(query) || (r.customerPhone || "").includes(query);
-      const matchReg = (r.vehicleRegNumber || "").toLowerCase().includes(query);
-      return matchId || matchCust || matchReg;
+      return (
+        (r.id || "").toLowerCase().includes(query) ||
+        (r.customerName || "").toLowerCase().includes(query) ||
+        (r.customerPhone || "").includes(query) ||
+        (r.vehicleRegNumber || "").toLowerCase().includes(query)
+      );
     }
     return true;
   });
@@ -443,103 +468,102 @@ function renderRequestsTable() {
 
   filtered.forEach((r) => {
     const tr = document.createElement("tr");
-
-    let statusBadge = `<span class="badge badge-warning">${r.status}</span>`;
+    let statusBadge = `<span class="badge badge-warning">${escapeHtml(r.status)}</span>`;
     if (r.status === "COMPLETED") statusBadge = `<span class="badge badge-success">COMPLETED</span>`;
-    else if (r.status === "CANCELLED") statusBadge = `<span class="badge badge-danger">CANCELLED</span>`;
-    else if (r.status === "EN_ROUTE" || r.status === "ARRIVED") statusBadge = `<span class="badge badge-info">${r.status}</span>`;
+    else if (r.status === "CANCELLED" || r.status === "EXPIRED") statusBadge = `<span class="badge badge-danger">${escapeHtml(r.status)}</span>`;
+    else if (r.status === "EN_ROUTE" || r.status === "ARRIVED") statusBadge = `<span class="badge badge-info">${escapeHtml(r.status)}</span>`;
 
-    const minsAgo = Math.round((Date.now() - r.createdAt) / 60000);
+    const minsAgo = Math.max(0, Math.round((Date.now() - (r.createdAt || Date.now())) / 60000));
 
     tr.innerHTML = `
       <td>
-        <strong>${r.id}</strong><br>
+        <strong>${escapeHtml(r.id)}</strong><br>
         <span class="text-muted">${minsAgo} mins ago</span>
       </td>
       <td>
-        ${escapeHtml(r.customerName || "Customer")} (${escapeHtml(r.customerPhone)})<br>
-        <span class="text-muted">${r.vehicleType} • ${r.vehicleRegNumber}</span>
+        ${escapeHtml(r.customerName || "Customer")} (${escapeHtml(r.customerPhone || "-")})<br>
+        <span class="text-muted">${escapeHtml(r.vehicleType)} • ${escapeHtml(r.vehicleRegNumber)}</span>
       </td>
-      <td><span class="badge badge-gray">${r.serviceCategory}</span></td>
+      <td><span class="badge badge-gray">${escapeHtml(r.serviceCategory)}</span></td>
       <td>${statusBadge}</td>
       <td>${r.assignedMechanicName ? `<strong>${escapeHtml(r.assignedMechanicName)}</strong>` : `<span class="text-muted">Unassigned</span>`}</td>
       <td>Batch #${r.dispatchBatch || 1} (${r.searchRadiusKm || 5} km)</td>
       <td>
-        <button class="btn btn-sm btn-secondary" onclick="openRequestDetail('${r.id}')">Inspect</button>
+        <button class="btn btn-sm btn-secondary" onclick="openRequestDetail('${escapeHtml(r.id)}')">Inspect</button>
       </td>
     `;
     tbody.appendChild(tr);
   });
 }
 
-window.openRequestDetail = function(requestId) {
+window.openRequestDetail = async function (requestId) {
   const req = serviceRequests.find((r) => r.id === requestId);
   if (!req) return;
 
   document.getElementById("modalReqTitle").textContent = `Incident #${req.id}`;
   document.getElementById("modalReqSub").textContent = `${req.serviceCategory} • ${req.status}`;
-  document.getElementById("detCustPhone").textContent = `${req.customerPhone} (${req.customerName || "Customer"})`;
-  document.getElementById("detVehicle").textContent = `${req.vehicleType} • ${req.vehicleRegNumber}`;
+  document.getElementById("detCustPhone").textContent = `${req.customerPhone || "-"} (${req.customerName || "Customer"})`;
+  document.getElementById("detVehicle").textContent = `${req.vehicleType} • ${req.vehicleRegNumber || "-"}`;
   document.getElementById("detCategory").textContent = req.serviceCategory;
   document.getElementById("detMechanic").textContent = req.assignedMechanicName || "Searching candidates...";
 
   const timelineBox = document.getElementById("reqTimelineList");
-  timelineBox.innerHTML = "";
-
-  (req.timeline || []).forEach((t) => {
-    const item = document.createElement("div");
-    item.className = "timeline-item";
-    const dateStr = new Date(t.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    item.innerHTML = `
-      <div class="timeline-time">${dateStr} • By ${escapeHtml(t.actor)}</div>
-      <div class="timeline-text">${t.from} ➔ <strong>${t.to}</strong></div>
-    `;
-    timelineBox.appendChild(item);
-  });
-
-  // Action handlers
-  document.getElementById("btnAdminCancelReq").onclick = () => {
-    req.status = "CANCELLED";
-    req.timeline.push({ from: "EN_ROUTE", to: "CANCELLED", time: Date.now(), actor: "ADMIN" });
-    if (req.assignedMechanicId) {
-      const m = mechanicsFleet.find((mech) => mech.mechanicId === req.assignedMechanicId);
-      if (m) m.isBusy = false;
-    }
-    auditLogs.unshift({
-      id: `LOG_${Date.now()}`,
-      action: "ADMIN_CANCEL_REQUEST",
-      admin: "admin@fixmechanic.in",
-      targetType: "SERVICE_REQUEST",
-      targetId: req.id,
-      details: "Admin emergency cancellation",
-      timestamp: Date.now(),
-    });
-    document.getElementById("requestDetailModal").classList.remove("open");
-    renderAll();
-    showToast(`Request #${req.id} cancelled by admin.`);
-  };
-
-  document.getElementById("btnAdminReassignReq").onclick = () => {
-    req.status = "SEARCHING";
-    req.assignedMechanicId = null;
-    req.assignedMechanicName = null;
-    req.dispatchBatch = (req.dispatchBatch || 1) + 1;
-    req.timeline.push({ from: "ASSIGNED", to: "SEARCHING", time: Date.now(), actor: "ADMIN (Emergency Reassign)" });
-    auditLogs.unshift({
-      id: `LOG_${Date.now()}`,
-      action: "ADMIN_REASSIGN_REQUEST",
-      admin: "admin@fixmechanic.in",
-      targetType: "SERVICE_REQUEST",
-      targetId: req.id,
-      details: `Reassigned to batch #${req.dispatchBatch}`,
-      timestamp: Date.now(),
-    });
-    document.getElementById("requestDetailModal").classList.remove("open");
-    renderAll();
-    showToast(`Request #${req.id} reopened for mechanic dispatch.`);
-  };
-
+  timelineBox.innerHTML = `<div class="text-muted">Loading authoritative jobStatusEvents...</div>`;
   document.getElementById("requestDetailModal").classList.add("open");
+
+  try {
+    const eventsSnap = await db
+      .collection("jobStatusEvents")
+      .where("requestId", "==", requestId)
+      .orderBy("timestamp", "asc")
+      .get();
+    timelineBox.innerHTML = "";
+    if (eventsSnap.empty) {
+      timelineBox.innerHTML = `<div class="text-muted">No status transitions logged yet.</div>`;
+    } else {
+      eventsSnap.forEach((doc) => {
+        const t = doc.data();
+        const item = document.createElement("div");
+        item.className = "timeline-item";
+        const dateStr = new Date(t.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        item.innerHTML = `
+          <div class="timeline-time">${dateStr} • By ${escapeHtml(t.actorRole || t.actorId)}</div>
+          <div class="timeline-text">${escapeHtml(t.fromStatus)} ➔ <strong>${escapeHtml(t.toStatus)}</strong></div>
+        `;
+        timelineBox.appendChild(item);
+      });
+    }
+  } catch (err) {
+    timelineBox.innerHTML = `<div class="text-muted">Could not load timeline: ${escapeHtml(err.message)}</div>`;
+  }
+
+  document.getElementById("btnAdminCancelReq").onclick = async () => {
+    try {
+      await callSparkBackend("adminCancelOrReassign", {
+        requestId: req.id,
+        action: "CANCEL",
+        reason: "Admin emergency cancellation via Web Console",
+      });
+      document.getElementById("requestDetailModal").classList.remove("open");
+      showToast(`Request #${req.id} cancelled.`);
+    } catch (err) {
+      showToast(`Cancel error: ${err.message}`);
+    }
+  };
+
+  document.getElementById("btnAdminReassignReq").onclick = async () => {
+    try {
+      await callSparkBackend("adminCancelOrReassign", {
+        requestId: req.id,
+        action: "REASSIGN",
+        reason: "Admin emergency reassignment via Web Console",
+      });
+      document.getElementById("requestDetailModal").classList.remove("open");
+      showToast(`Request #${req.id} reopened for dispatch.`);
+    } catch (err) {
+      showToast(`Reassign error: ${err.message}`);
+    }
+  };
 };
 
 function initCsvImporter() {
@@ -557,120 +581,70 @@ function initCsvImporter() {
   loadSampleBtn.addEventListener("click", () => {
     textarea.value = `name,phone,email,vehicleTypes,serviceCategories,locality,lat,lng
 Rajesh Sharma,9810123401,rajesh@example.com,"TWO_WHEELER,FOUR_WHEELER_CAR","FLAT_TYRE,BATTERY_JUMPSTART",Sector 29 Gurugram,28.4682,77.0617
-Amit Kumar,9810123402,amit@example.com,"TWO_WHEELER,FOUR_WHEELER_CAR","FLAT_TYRE,LOCKOUT",DLF Phase 4 Gurugram,28.4725,77.0850
-Vikas Yadav,9810123403,vikas@example.com,"FOUR_WHEELER_CAR,COMMERCIAL_LIGHT","TOWING",Sohna Road Gurugram,28.4231,77.0428
-Sunil Verma,9810123404,sunil@example.com,"TWO_WHEELER","FLAT_TYRE,FUEL_DELIVERY",Sector 14 Gurugram,28.4750,77.0392
-Harish Kataria,9810123415,harish@example.com,"FOUR_WHEELER_CAR","BATTERY_JUMPSTART,LOCKOUT",Sector 51 Gurugram,28.4320,77.0780
-Duplicate Rajesh,9810123401,dup@example.com,"TWO_WHEELER","FLAT_TYRE",Sector 29 Gurugram,28.4682,77.0617
-Invalid Phone Person,12345,badphone@example.com,"FOUR_WHEELER_CAR","BATTERY_JUMPSTART",Sector 14 Gurugram,28.4750,77.0392`;
-    showToast("Loaded sample mechanics into text area.");
+Amit Kumar,9810123402,amit@example.com,"TWO_WHEELER,FOUR_WHEELER_CAR","FLAT_TYRE,LOCKOUT",DLF Phase 4 Gurugram,28.4725,77.0850`;
   });
 
-  validateBtn.addEventListener("click", () => {
+  function extractCsvRows() {
     const raw = textarea.value.trim();
-    if (!raw) {
-      alert("Please provide CSV content to validate.");
-      return;
-    }
-
     const lines = raw.split("\n").map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
-    if (lines.length < 2) {
-      alert("CSV must contain a header line and at least one data row.");
-      return;
-    }
-
-    const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
-    const validRows = [];
-    const invalidRows = [];
-    const seenPhones = new Set();
-    const existingPhones = new Set(mechanicsFleet.map((m) => m.phone.replace(/\D/g, "")));
-    let duplicates = 0;
-
+    if (lines.length < 2) return [];
+    const rows = [];
     for (let i = 1; i < lines.length; i++) {
       const cols = parseCsvLine(lines[i]);
-      const name = cols[0] || "";
-      const phone = (cols[1] || "").replace(/\D/g, "");
-      const email = cols[2] || "";
-      const vTypes = cols[3] || "TWO_WHEELER,FOUR_WHEELER_CAR";
-      const services = cols[4] || "FLAT_TYRE";
-      const loc = cols[5] || "Gurugram Pilot Zone";
-      const lat = parseFloat(cols[6]) || 28.4595;
-      const lng = parseFloat(cols[7]) || 77.0266;
-
-      const errors = [];
-      if (!name || name.length < 2) errors.push("Missing or invalid name.");
-      if (!phone || phone.length < 10) errors.push(`Invalid phone digits (${phone || "empty"}).`);
-
-      if (existingPhones.has(phone)) {
-        errors.push(`Duplicate phone already registered: ${phone}`);
-        duplicates++;
-      } else if (seenPhones.has(phone)) {
-        errors.push(`Duplicate phone within this batch: ${phone}`);
-        duplicates++;
-      } else {
-        seenPhones.add(phone);
-      }
-
-      if (errors.length > 0) {
-        invalidRows.push({ row: i, name, errors });
-      } else {
-        validRows.push({
-          mechanicId: `mech_csv_${phone.slice(-6)}`,
-          name,
-          phone,
-          email,
-          approvalStatus: "PENDING", // Starts in PENDING!
-          isOnline: false,
-          isBusy: false,
-          activeJobId: null,
-          vehicleTypes: vTypes.split(",").map((s) => s.trim()),
-          serviceCategories: services.split(",").map((s) => s.trim()),
-          currentLocation: { lat, lng, address: loc, updatedAt: Date.now() },
-          ratingAverage: 5.0,
-          ratingCount: 0,
-        });
-      }
+      rows.push({
+        name: cols[0] || "",
+        phone: cols[1] || "",
+        email: cols[2] || "",
+        vehicleTypes: cols[3] || "TWO_WHEELER,FOUR_WHEELER_CAR",
+        serviceCategories: cols[4] || "FLAT_TYRE",
+        locality: cols[5] || "Gurugram Pilot Zone",
+        lat: cols[6] || "28.4595",
+        lng: cols[7] || "77.0266",
+      });
     }
+    return rows;
+  }
 
-    stagedCsvValidRows = validRows;
-
-    // Show report
-    document.getElementById("csvValidationReport").style.display = "block";
-    document.getElementById("valValidCount").textContent = validRows.length;
-    document.getElementById("valInvalidCount").textContent = invalidRows.length;
-    document.getElementById("valDupeCount").textContent = duplicates;
-
-    const errorBox = document.getElementById("csvErrorsList");
-    if (invalidRows.length > 0) {
-      errorBox.style.display = "block";
-      errorBox.innerHTML = `<strong>Row Validation Issues:</strong><br>` +
-        invalidRows.map((inv) => `Line ${inv.row} (${inv.name || "Unknown"}): ${inv.errors.join(", ")}`).join("<br>");
-    } else {
-      errorBox.style.display = "none";
+  validateBtn.addEventListener("click", async () => {
+    const rows = extractCsvRows();
+    if (rows.length === 0) {
+      showToast("CSV must contain a header line and at least one data row.");
+      return;
     }
+    try {
+      const res = await callSparkBackend("processMechanicsCsv", { rows, commit: false });
+      stagedCsvRows = rows;
+      const v = res.validation;
+      document.getElementById("csvValidationReport").style.display = "block";
+      document.getElementById("valValidCount").textContent = v.validRows.length;
+      document.getElementById("valInvalidCount").textContent = v.invalidRows.length;
+      document.getElementById("valDupeCount").textContent = v.duplicateCount;
 
-    commitBtn.disabled = validRows.length === 0;
+      const errorBox = document.getElementById("csvErrorsList");
+      if (v.invalidRows.length > 0) {
+        errorBox.style.display = "block";
+        errorBox.innerHTML =
+          `<strong>Row Validation Issues:</strong><br>` +
+          v.invalidRows.map((inv) => `Line ${inv.rowIndex + 1}: ${escapeHtml(inv.errors.join(", "))}`).join("<br>");
+      } else {
+        errorBox.style.display = "none";
+      }
+      commitBtn.disabled = v.validRows.length === 0;
+    } catch (err) {
+      showToast(`Validation error: ${err.message}`);
+    }
   });
 
-  commitBtn.addEventListener("click", () => {
-    if (stagedCsvValidRows.length === 0) return;
-
-    mechanicsFleet.unshift(...stagedCsvValidRows);
-
-    auditLogs.unshift({
-      id: `LOG_${Date.now()}`,
-      action: "CSV_MECHANICS_IMPORTED",
-      admin: "admin@fixmechanic.in",
-      targetType: "MECHANIC",
-      targetId: "BATCH_IMPORT",
-      details: `Imported ${stagedCsvValidRows.length} mechanics in PENDING approval status.`,
-      timestamp: Date.now(),
-    });
-
-    modal.classList.remove("open");
-    renderAll();
-    showToast(`Successfully imported ${stagedCsvValidRows.length} mechanics! They are pending verification.`);
-    stagedCsvValidRows = [];
+  commitBtn.addEventListener("click", async () => {
+    if (stagedCsvRows.length === 0) return;
+    try {
+      const res = await callSparkBackend("processMechanicsCsv", { rows: stagedCsvRows, commit: true });
+      modal.classList.remove("open");
+      stagedCsvRows = [];
+      showToast(`Imported ${res.importedCount} mechanics in PENDING status.`);
+    } catch (err) {
+      showToast(`Import error: ${err.message}`);
+    }
   });
 }
 
@@ -680,9 +654,8 @@ function parseCsvLine(text) {
   let inQuotes = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (c === '"') {
-      inQuotes = !inQuotes;
-    } else if (c === ',' && !inQuotes) {
+    if (c === '"') inQuotes = !inQuotes;
+    else if (c === "," && !inQuotes) {
       result.push(cur.trim());
       cur = "";
     } else {
@@ -694,103 +667,63 @@ function parseCsvLine(text) {
 }
 
 function initConfigForm() {
-  const form = document.getElementById("configForm");
-  form.addEventListener("submit", (e) => {
+  document.getElementById("configForm").addEventListener("submit", async (e) => {
     e.preventDefault();
-    appConfig.defaultSearchRadiusKm = parseFloat(document.getElementById("cfgSearchRadius").value);
-    appConfig.maxSearchRadiusKm = parseFloat(document.getElementById("cfgMaxRadius").value);
-    appConfig.initialOfferBatchSize = parseInt(document.getElementById("cfgBatchSize").value);
-    appConfig.offerTimeoutSeconds = parseInt(document.getElementById("cfgOfferTimeout").value);
-    appConfig.maxMechanicDispatchAttempts = parseInt(document.getElementById("cfgMaxRetries").value);
-    appConfig.maxMechanicLocationStalenessMinutes = parseInt(document.getElementById("cfgStaleness").value);
-    appConfig.localityName = document.getElementById("cfgLocalityName").value;
-
-    auditLogs.unshift({
-      id: `LOG_${Date.now()}`,
-      action: "CONFIG_UPDATED",
-      admin: "admin@fixmechanic.in",
-      targetType: "SYSTEM_CONFIG",
-      targetId: "pilot_gurugram",
-      details: `Radius: ${appConfig.defaultSearchRadiusKm}km, Batch: ${appConfig.initialOfferBatchSize}`,
-      timestamp: Date.now(),
-    });
-
-    renderAll();
-    showToast("Operational parameters updated.");
+    try {
+      await callSparkBackend("updateApplicationConfig", {
+        defaultSearchRadiusKm: parseFloat(document.getElementById("cfgSearchRadius").value),
+        maxSearchRadiusKm: parseFloat(document.getElementById("cfgMaxRadius").value),
+        initialOfferBatchSize: parseInt(document.getElementById("cfgBatchSize").value, 10),
+        offerTimeoutSeconds: parseInt(document.getElementById("cfgOfferTimeout").value, 10),
+        maxMechanicDispatchAttempts: parseInt(document.getElementById("cfgMaxRetries").value, 10),
+        maxMechanicLocationStalenessMinutes: parseInt(document.getElementById("cfgStaleness").value, 10),
+        localityName: document.getElementById("cfgLocalityName").value.trim(),
+      });
+      showToast("Operational parameters saved to Firestore.");
+    } catch (err) {
+      showToast(`Config save error: ${err.message}`);
+    }
   });
 }
 
 function initSimulation() {
-  document.getElementById("btnSimulateRequest").addEventListener("click", () => {
+  document.getElementById("btnSimulateRequest").addEventListener("click", async () => {
     const vType = document.getElementById("simVehicleType").value;
     const cat = document.getElementById("simServiceCategory").value;
-    const addr = document.getElementById("simAddress").value;
-
-    const newId = `REQ-${Math.floor(100 + Math.random() * 900)}`;
-    const now = Date.now();
-
-    // Find candidate mechanics (Approved & Online)
-    const candidates = mechanicsFleet.filter((m) => m.approvalStatus === "APPROVED" && m.isOnline && !m.isBusy);
-
-    let assignedMech = null;
-    if (candidates.length > 0) {
-      assignedMech = candidates[0]; // Nearest winner
-      assignedMech.isBusy = true;
-      assignedMech.activeJobId = newId;
+    const addr = document.getElementById("simAddress").value.trim();
+    try {
+      const res = await callSparkBackend("createServiceRequest", {
+        vehicleType: vType,
+        serviceCategory: cat,
+        issueTitle: cat.replace(/_/g, " "),
+        address: addr || "Sector 29 Gurugram",
+        lat: 28.4595,
+        lng: 77.0266,
+      });
+      showToast(`Request ${res.requestId} dispatched (${res.dispatchedCount} mechanics notified).`);
+    } catch (err) {
+      showToast(`Dispatch error: ${err.message}`);
     }
-
-    const newReq = {
-      id: newId,
-      customerId: "cust_test_99",
-      customerName: "Vikram Malhotra",
-      customerPhone: "9818822331",
-      vehicleType: vType,
-      vehicleRegNumber: "HR26-BW-7712",
-      serviceCategory: cat,
-      status: assignedMech ? "ASSIGNED" : "SEARCHING",
-      assignedMechanicId: assignedMech ? assignedMech.mechanicId : null,
-      assignedMechanicName: assignedMech ? assignedMech.name : null,
-      dispatchBatch: 1,
-      searchRadiusKm: appConfig.defaultSearchRadiusKm,
-      location: { address: addr, lat: 28.4682, lng: 77.0617 },
-      createdAt: now,
-      timeline: [
-        { from: "REQUESTED", to: "SEARCHING", time: now, actor: "CUSTOMER" },
-        ...(assignedMech ? [{ from: "SEARCHING", to: "ASSIGNED", time: now + 1000, actor: "SYSTEM (Atomic Lock Transaction)" }] : [])
-      ]
-    };
-
-    serviceRequests.unshift(newReq);
-
-    auditLogs.unshift({
-      id: `LOG_${Date.now()}`,
-      action: assignedMech ? "JOB_ATOMICALLY_ASSIGNED" : "REQUEST_DISPATCH_STARTED",
-      admin: "SYSTEM",
-      targetType: "SERVICE_REQUEST",
-      targetId: newId,
-      details: assignedMech ? `Winner: ${assignedMech.name} (${assignedMech.mechanicId})` : "Searching eligible fleet...",
-      timestamp: now,
-    });
-
-    renderAll();
-    showToast(`Simulated request ${newId} created! Status: ${newReq.status}`);
   });
 }
 
 function renderAuditTable() {
   const tbody = document.getElementById("auditTableBody");
   tbody.innerHTML = "";
-
-  auditLogs.slice(0, 30).forEach((l) => {
+  auditLogs.slice(0, 50).forEach((l) => {
     const tr = document.createElement("tr");
-    const timeStr = new Date(l.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
+    const timeStr = new Date(l.timestamp || Date.now()).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    const detailStr = typeof l.details === "string" ? l.details : JSON.stringify(l.details || {});
     tr.innerHTML = `
       <td style="white-space: nowrap;">${timeStr}</td>
       <td><strong>${escapeHtml(l.action)}</strong></td>
-      <td><span class="badge badge-gray">${escapeHtml(l.admin)}</span></td>
+      <td><span class="badge badge-gray">${escapeHtml(l.adminEmail || l.adminId || "SYSTEM")}</span></td>
       <td>${escapeHtml(l.targetType)} • <span class="code-font">${escapeHtml(l.targetId)}</span></td>
-      <td style="font-size: 0.8rem; color: var(--text-sub);">${escapeHtml(l.details)}</td>
+      <td style="font-size: 0.8rem; color: var(--text-sub);">${escapeHtml(detailStr)}</td>
     `;
     tbody.appendChild(tr);
   });
@@ -825,8 +758,9 @@ function showToast(msg) {
 }
 
 function escapeHtml(str) {
-  if (!str) return "";
-  return str.toString()
+  if (str === null || str === undefined) return "";
+  return str
+    .toString()
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

@@ -16,7 +16,8 @@ enum class ServiceRequestStatus {
   ARRIVED,
   IN_PROGRESS,
   COMPLETED,
-  CANCELLED
+  CANCELLED,
+  EXPIRED
 }
 
 data class MechanicItem(
@@ -87,3 +88,14 @@ data class CsvParseResult(
   val invalidRows: List<Pair<Int, String>>,
   val duplicateCount: Int
 )
+
+sealed class AdminSessionState {
+  data object Loading : AdminSessionState()
+  data object Unauthenticated : AdminSessionState()
+  data class Unauthorized(val email: String?, val reason: String) : AdminSessionState()
+  data class Authenticated(
+    val uid: String,
+    val email: String,
+    val displayName: String
+  ) : AdminSessionState()
+}

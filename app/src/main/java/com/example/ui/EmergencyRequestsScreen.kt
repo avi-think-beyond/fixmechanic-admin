@@ -133,7 +133,7 @@ fun RequestCard(
 ) {
   val (statusBg, statusFg) = when (request.status) {
     ServiceRequestStatus.COMPLETED -> StatusGreenBg to StatusGreen
-    ServiceRequestStatus.CANCELLED -> StatusRedBg to StatusRed
+    ServiceRequestStatus.CANCELLED, ServiceRequestStatus.EXPIRED -> StatusRedBg to StatusRed
     ServiceRequestStatus.SEARCHING, ServiceRequestStatus.REQUESTED -> StatusAmberBg to StatusAmber
     else -> StatusBlueBg to StatusBlue
   }

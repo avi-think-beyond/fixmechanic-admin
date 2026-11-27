@@ -34,22 +34,19 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.handleUpdateJobStatus = handleUpdateJobStatus;
-/**
- * Authoritative Job Status State Machine
- * Strictly enforces valid status transitions, role authorizations,
- * immutable audit history, mechanic availability updates, and chat closure.
- */
 const functions = __importStar(require("firebase-functions"));
 const auth_1 = require("./auth");
-// Matrix of allowed state transitions and required roles
+const dispatchEngine_1 = require("./dispatchEngine");
+const notifications_1 = require("./notifications");
 const ALLOWED_TRANSITIONS = {
     REQUESTED: [
-        { to: "SEARCHING", allowedRoles: ["ADMIN", "SYSTEM"] },
-        { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN", "SYSTEM"] },
+        { to: "SEARCHING", allowedRoles: ["ADMIN"] },
+        { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN"] },
     ],
     SEARCHING: [
-        { to: "ASSIGNED", allowedRoles: ["ADMIN", "SYSTEM"] },
-        { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN", "SYSTEM"] },
+        { to: "ASSIGNED", allowedRoles: ["ADMIN"] },
+        { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN"] },
+        { to: "EXPIRED", allowedRoles: ["ADMIN"] },
     ],
     ASSIGNED: [
         { to: "ACCEPTED", allowedRoles: ["MECHANIC", "ADMIN"] },
@@ -61,7 +58,6 @@ const ALLOWED_TRANSITIONS = {
     ],
     EN_ROUTE: [
         { to: "ARRIVED", allowedRoles: ["MECHANIC", "ADMIN"] },
-        // Customers can no longer freely cancel without admin review once mechanic is en route
         { to: "CANCELLED", allowedRoles: ["MECHANIC", "ADMIN"] },
     ],
     ARRIVED: [
@@ -72,18 +68,24 @@ const ALLOWED_TRANSITIONS = {
         { to: "COMPLETED", allowedRoles: ["MECHANIC", "ADMIN"] },
         { to: "CANCELLED", allowedRoles: ["ADMIN"] },
     ],
-    COMPLETED: [], // Terminal
-    CANCELLED: [], // Terminal
+    COMPLETED: [],
+    CANCELLED: [],
+    EXPIRED: [
+        { to: "SEARCHING", allowedRoles: ["CUSTOMER", "ADMIN"] },
+        { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN"] },
+    ],
 };
 async function handleUpdateJobStatus(data, context, db) {
     const caller = await (0, auth_1.assertCallerRole)(context, db, ["CUSTOMER", "MECHANIC", "ADMIN"]);
     const actorId = caller.uid;
     const actorRole = caller.role;
-    if (!data.requestId || !data.targetStatus) {
+    if (!data?.requestId || !data?.targetStatus) {
         throw new functions.https.HttpsError("invalid-argument", "Request ID and target status are required.");
     }
     const reqRef = db.collection("serviceRequests").doc(data.requestId);
-    return await db.runTransaction(async (transaction) => {
+    let reopenDispatchBatch = null;
+    let notifyTarget = null;
+    const result = await db.runTransaction(async (transaction) => {
         const reqDoc = await transaction.get(reqRef);
         if (!reqDoc.exists) {
             throw new functions.https.HttpsError("not-found", "Service request not found.");
@@ -99,26 +101,79 @@ async function handleUpdateJobStatus(data, context, db) {
                 message: `Job is already in status ${targetStatus}.`,
             };
         }
-        // Role-specific ownership checks
         if (actorRole === "CUSTOMER" && request.customerId !== actorId) {
             throw new functions.https.HttpsError("permission-denied", "You can only update your own service request.");
         }
         if (actorRole === "MECHANIC" && request.assignedMechanicId !== actorId) {
             throw new functions.https.HttpsError("permission-denied", "You are not the assigned mechanic for this job.");
         }
-        // Check transition validity in state machine matrix
         const possibleTransitions = ALLOWED_TRANSITIONS[currentStatus] || [];
         const validTransition = possibleTransitions.find((t) => t.to === targetStatus && t.allowedRoles.includes(actorRole));
         if (!validTransition) {
             throw new functions.https.HttpsError("failed-precondition", `Invalid status transition from '${currentStatus}' to '${targetStatus}' by role '${actorRole}'.`);
         }
         const now = Date.now();
+        // If MECHANIC cancels before IN_PROGRESS, release mechanic and reopen for redispatch
+        if (actorRole === "MECHANIC" && targetStatus === "CANCELLED") {
+            const nextBatch = (request.dispatchBatch || 1) + 1;
+            reopenDispatchBatch = nextBatch;
+            transaction.update(reqRef, {
+                status: "SEARCHING",
+                assignedMechanicId: null,
+                assignedMechanicName: null,
+                assignedMechanicPhoneMasked: null,
+                assignedMechanicLocation: null,
+                dispatchBatch: nextBatch,
+                updatedAt: now,
+            });
+            const mechanicRef = db.collection("mechanicProfiles").doc(actorId);
+            transaction.update(mechanicRef, {
+                isBusy: false,
+                activeJobId: null,
+                updatedAt: now,
+            });
+            const eventRef = db.collection("jobStatusEvents").doc();
+            transaction.set(eventRef, {
+                id: eventRef.id,
+                requestId: data.requestId,
+                fromStatus: currentStatus,
+                toStatus: "SEARCHING",
+                actorId,
+                actorRole,
+                note: `Mechanic cancelled (${data.cancellationReason || data.note || "Unavailable"}); re-opened for dispatch.`,
+                timestamp: now,
+            });
+            notifyTarget = {
+                userId: request.customerId,
+                role: "CUSTOMER",
+                title: "Reassigning Mechanic",
+                body: "Your assigned mechanic had to cancel. We are automatically matching the next nearest mechanic.",
+            };
+            return {
+                success: true,
+                fromStatus: currentStatus,
+                toStatus: "SEARCHING",
+                message: "Job released and re-opened for automatic redispatch.",
+            };
+        }
+        const isTerminal = targetStatus === "COMPLETED" || targetStatus === "CANCELLED";
+        const mechanicRef = isTerminal && request.assignedMechanicId
+            ? db.collection("mechanicProfiles").doc(request.assignedMechanicId)
+            : null;
+        const chatRef = isTerminal ? db.collection("jobChats").doc(data.requestId) : null;
+        // ALL transaction reads MUST precede ALL transaction writes
+        const mechSnap = mechanicRef ? await transaction.get(mechanicRef) : null;
+        const chatSnap = chatRef ? await transaction.get(chatRef) : null;
         const updatePayload = {
             status: targetStatus,
             updatedAt: now,
         };
         if (targetStatus === "COMPLETED") {
             updatePayload.completedAt = now;
+            if (typeof data.finalPartsFee === "number")
+                updatePayload.finalPartsFee = data.finalPartsFee;
+            if (typeof data.totalPaid === "number")
+                updatePayload.totalPaid = data.totalPaid;
         }
         else if (targetStatus === "CANCELLED") {
             updatePayload.cancelledAt = now;
@@ -126,7 +181,6 @@ async function handleUpdateJobStatus(data, context, db) {
             updatePayload.cancellationReason = data.cancellationReason || data.note || "Cancelled by user";
         }
         transaction.update(reqRef, updatePayload);
-        // Record immutable audit event
         const eventRef = db.collection("jobStatusEvents").doc();
         transaction.set(eventRef, {
             id: eventRef.id,
@@ -138,23 +192,45 @@ async function handleUpdateJobStatus(data, context, db) {
             note: data.note || `Transition to ${targetStatus}`,
             timestamp: now,
         });
-        // Terminal status cleanup
-        if (targetStatus === "COMPLETED" || targetStatus === "CANCELLED") {
-            // 1. Release assigned mechanic availability if assigned
-            if (request.assignedMechanicId) {
-                const mechanicRef = db.collection("mechanicProfiles").doc(request.assignedMechanicId);
-                transaction.update(mechanicRef, {
+        if (isTerminal) {
+            if (mechanicRef && mechSnap && mechSnap.exists) {
+                const mechUpdate = {
                     isBusy: false,
                     activeJobId: null,
+                    updatedAt: now,
+                };
+                if (targetStatus === "COMPLETED") {
+                    const prevJobs = mechSnap.data()?.totalCompletedJobs || 0;
+                    const prevEarnings = mechSnap.data()?.todayEarningsInr || 0;
+                    const payout = data.totalPaid ?? request.estimatedPriceInr ?? 349;
+                    mechUpdate.totalCompletedJobs = prevJobs + 1;
+                    mechUpdate.todayEarningsInr = prevEarnings + payout;
+                }
+                transaction.update(mechanicRef, mechUpdate);
+            }
+            if (chatRef && chatSnap && chatSnap.exists) {
+                transaction.update(chatRef, {
+                    status: "CLOSED",
+                    closedAt: now,
+                    closedReason: `Job entered terminal status ${targetStatus}`,
                 });
             }
-            // 2. Close private job chat
-            const chatRef = db.collection("jobChats").doc(data.requestId);
-            transaction.update(chatRef, {
-                status: "CLOSED",
-                closedAt: now,
-                closedReason: `Job entered terminal status ${targetStatus}`,
-            });
+        }
+        if (actorRole === "MECHANIC") {
+            notifyTarget = {
+                userId: request.customerId,
+                role: "CUSTOMER",
+                title: `Job Update: ${targetStatus.replace(/_/g, " ")}`,
+                body: `Your mechanic updated your request status to ${targetStatus.replace(/_/g, " ")}.`,
+            };
+        }
+        else if (actorRole === "CUSTOMER" && targetStatus === "CANCELLED" && request.assignedMechanicId) {
+            notifyTarget = {
+                userId: request.assignedMechanicId,
+                role: "MECHANIC",
+                title: "Job Cancelled by Customer",
+                body: "The customer cancelled this emergency request. You are now available for new offers.",
+            };
         }
         return {
             success: true,
@@ -163,5 +239,21 @@ async function handleUpdateJobStatus(data, context, db) {
             message: `Job status transitioned from ${currentStatus} to ${targetStatus}.`,
         };
     });
+    if (reopenDispatchBatch !== null) {
+        await (0, dispatchEngine_1.dispatchServiceRequest)(db, data.requestId, reopenDispatchBatch).catch(console.error);
+    }
+    if (notifyTarget) {
+        const target = notifyTarget;
+        (0, notifications_1.sendNotificationToUser)(db, target.userId, target.role, {
+            title: target.title,
+            body: target.body,
+            data: {
+                requestId: data.requestId,
+                type: "JOB_STATUS_CHANGED",
+                status: result.toStatus,
+            },
+        }).catch(() => { });
+    }
+    return result;
 }
 //# sourceMappingURL=jobStatusMachine.js.map

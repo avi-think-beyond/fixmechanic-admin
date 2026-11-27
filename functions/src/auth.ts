@@ -1,7 +1,3 @@
-/**
- * Auth and Trusted Role Enforcement
- * Enforces server-side authority for CUSTOMER, MECHANIC, and ADMIN roles.
- */
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
 import { UserRole, MechanicApprovalStatus } from "./types";
@@ -13,9 +9,6 @@ export interface AuthenticatedUser {
   email?: string;
 }
 
-/**
- * Verify caller authentication and retrieve authoritative role from Firestore & Custom Claims
- */
 export async function assertCallerRole(
   context: functions.https.CallableContext,
   db: admin.firestore.Firestore,
@@ -30,7 +23,6 @@ export async function assertCallerRole(
 
   const uid = context.auth.uid;
   const userDoc = await db.collection("users").doc(uid).get();
-
   if (!userDoc.exists) {
     throw new functions.https.HttpsError(
       "permission-denied",
@@ -46,7 +38,7 @@ export async function assertCallerRole(
     );
   }
 
-  const role = userData?.role as UserRole;
+  const role = String(userData?.role || "").toUpperCase() as UserRole;
   if (!allowedRoles.includes(role)) {
     throw new functions.https.HttpsError(
       "permission-denied",
@@ -64,13 +56,10 @@ export async function assertCallerRole(
     uid,
     role,
     approvalStatus,
-    email: context.auth.token.email || userData?.email,
+    email: context.auth.token?.email || userData?.email,
   };
 }
 
-/**
- * Sync custom user claims when user record role is modified or set
- */
 export async function syncUserClaims(
   uid: string,
   role: UserRole,
