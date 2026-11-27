@@ -1,17 +1,19 @@
-/**
- * FixMechanic Dispatch Engine
- * Server-side mechanic matching with distance ranking, eligibility filters,
- * batch offers, expiration management, radius expansion, and operational logging.
- */
+import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
 import {
-  ServiceRequest,
-  MechanicProfile,
-  JobOffer,
   ApplicationConfig,
+  JobOffer,
+  MechanicProfile,
+  ServiceRequest,
 } from "./types";
-import { calculateHaversineDistanceKm, DEFAULT_CONFIG } from "./config";
+import {
+  calculateHaversineDistanceKm,
+  DEFAULT_CONFIG,
+  normalizeServiceCategory,
+  normalizeVehicleType,
+} from "./config";
 import { sendNotificationToUser } from "./notifications";
+import { assertCallerRole } from "./auth";
 
 export async function getApplicationConfig(
   db: admin.firestore.Firestore
@@ -37,7 +39,6 @@ export async function findEligibleMechanics(
   const now = Date.now();
   const maxStalenessMs = config.maxMechanicLocationStalenessMinutes * 60 * 1000;
 
-  // Query approved, online, available mechanics
   const querySnapshot = await db
     .collection("mechanicProfiles")
     .where("approvalStatus", "==", "APPROVED")
@@ -49,57 +50,54 @@ export async function findEligibleMechanics(
     return [];
   }
 
-  // Fetch already offered mechanic IDs for this request to avoid duplicates
   const existingOffers = await db
     .collection("jobOffers")
     .where("requestId", "==", request.id)
     .get();
-
   const alreadyOfferedIds = new Set<string>();
   existingOffers.forEach((doc) => {
     alreadyOfferedIds.add(doc.data().mechanicId);
   });
 
+  const reqVehicleType = normalizeVehicleType(request.vehicleType);
+  const reqServiceCat = normalizeServiceCategory(request.serviceCategory);
   const candidates: CandidateEvaluation[] = [];
 
   for (const doc of querySnapshot.docs) {
     const mech = doc.data() as MechanicProfile;
-
-    // 1. Skip if already offered in this or previous batch
-    if (alreadyOfferedIds.has(mech.mechanicId)) {
+    const mechId = mech.mechanicId || doc.id;
+    if (alreadyOfferedIds.has(mechId)) {
       continue;
     }
 
-    // 2. Check vehicle type compatibility
+    const mechVehicleTypes = (mech.vehicleTypes || []).map((v) => normalizeVehicleType(v));
+    if (mechVehicleTypes.length > 0 && !mechVehicleTypes.includes(reqVehicleType)) {
+      continue;
+    }
+
+    const mechServices = (mech.serviceCategories || []).map((s) => normalizeServiceCategory(s));
     if (
-      mech.vehicleTypes &&
-      mech.vehicleTypes.length > 0 &&
-      !mech.vehicleTypes.includes(request.vehicleType)
+      mechServices.length > 0 &&
+      reqServiceCat !== "OTHER" &&
+      !mechServices.includes(reqServiceCat) &&
+      !mechServices.includes("OTHER")
     ) {
       continue;
     }
 
-    // 3. Check service category compatibility
     if (
-      mech.serviceCategories &&
-      mech.serviceCategories.length > 0 &&
-      !mech.serviceCategories.includes(request.serviceCategory)
+      !mech.currentLocation ||
+      typeof mech.currentLocation.lat !== "number" ||
+      typeof mech.currentLocation.lng !== "number"
     ) {
-      continue;
-    }
-
-    // 4. Verify location presence and staleness
-    if (!mech.currentLocation || !mech.currentLocation.lat || !mech.currentLocation.lng) {
       continue;
     }
 
     const locUpdatedAt = mech.currentLocation.updatedAt || 0;
     if (locUpdatedAt > 0 && now - locUpdatedAt > maxStalenessMs) {
-      console.log(`[Dispatch] Mechanic ${mech.mechanicId} skipped: location stale (${Math.round((now - locUpdatedAt) / 60000)}m ago)`);
       continue;
     }
 
-    // 5. Calculate Haversine distance
     const dist = calculateHaversineDistanceKm(
       request.location.lat,
       request.location.lng,
@@ -107,12 +105,12 @@ export async function findEligibleMechanics(
       mech.currentLocation.lng
     );
 
-    if (dist <= radiusKm) {
-      candidates.push({ mechanic: mech, distanceKm: dist });
+    const maxAllowedKm = Math.min(radiusKm, mech.serviceRadiusKm || 50);
+    if (dist <= maxAllowedKm) {
+      candidates.push({ mechanic: { ...mech, mechanicId: mechId }, distanceKm: dist });
     }
   }
 
-  // Sort candidate mechanics by distance ascending (nearest first)
   candidates.sort((a, b) => a.distanceKm - b.distanceKm);
   return candidates;
 }
@@ -121,38 +119,60 @@ export async function dispatchServiceRequest(
   db: admin.firestore.Firestore,
   requestId: string,
   batchNumber: number = 1
-): Promise<{ dispatchedCount: number; message: string }> {
+): Promise<{ dispatchedCount: number; expired: boolean; message: string }> {
   const config = await getApplicationConfig(db);
   const reqRef = db.collection("serviceRequests").doc(requestId);
   const reqDoc = await reqRef.get();
-
   if (!reqDoc.exists) {
-    return { dispatchedCount: 0, message: "Request does not exist" };
+    return { dispatchedCount: 0, expired: false, message: "Request does not exist" };
   }
 
   const request = reqDoc.data() as ServiceRequest;
-
-  // Halt dispatch if already assigned, cancelled or completed
-  if (["ASSIGNED", "ACCEPTED", "EN_ROUTE", "ARRIVED", "IN_PROGRESS", "COMPLETED", "CANCELLED"].includes(request.status)) {
-    console.log(`[Dispatch] Request ${requestId} is already in state ${request.status}. Halting dispatch.`);
-    return { dispatchedCount: 0, message: `Request is already ${request.status}` };
+  if (
+    ["ASSIGNED", "ACCEPTED", "EN_ROUTE", "ARRIVED", "IN_PROGRESS", "COMPLETED", "CANCELLED"].includes(
+      request.status
+    )
+  ) {
+    return { dispatchedCount: 0, expired: false, message: `Request is already ${request.status}` };
   }
 
-  // Calculate search radius based on batch
-  const currentRadius = Math.min(
-    config.defaultSearchRadiusKm + (batchNumber - 1) * config.radiusExpansionStepKm,
-    config.maxSearchRadiusKm
-  );
+  let candidates: CandidateEvaluation[] = [];
+  let attemptBatch = batchNumber;
+  let currentRadius = config.defaultSearchRadiusKm;
 
-  console.log(`[Dispatch] Searching mechanics for req ${requestId} (Batch ${batchNumber}, Radius ${currentRadius}km)`);
+  while (attemptBatch <= config.maxMechanicDispatchAttempts) {
+    currentRadius = Math.min(
+      config.defaultSearchRadiusKm + (attemptBatch - 1) * config.radiusExpansionStepKm,
+      config.maxSearchRadiusKm
+    );
+    candidates = await findEligibleMechanics(db, request, currentRadius, config);
+    if (candidates.length > 0) {
+      break;
+    }
+    attemptBatch++;
+  }
 
-  const candidates = await findEligibleMechanics(db, request, currentRadius, config);
-
+  const now = Date.now();
   if (candidates.length === 0) {
-    console.warn(`[Dispatch Warning] No eligible mechanics found for req ${requestId} in batch ${batchNumber}`);
-
-    // If max batches reached, log failed dispatch in admin audit logs
-    if (batchNumber >= config.maxMechanicDispatchAttempts) {
+    const reachedMax = attemptBatch > config.maxMechanicDispatchAttempts;
+    if (reachedMax) {
+      await reqRef.update({
+        status: "EXPIRED",
+        dispatchBatch: config.maxMechanicDispatchAttempts,
+        searchRadiusKm: currentRadius,
+        updatedAt: now,
+      });
+      const eventRef = db.collection("jobStatusEvents").doc();
+      await eventRef.set({
+        id: eventRef.id,
+        requestId,
+        fromStatus: request.status,
+        toStatus: "EXPIRED",
+        actorId: "SYSTEM",
+        actorRole: "SYSTEM",
+        note: `No eligible mechanics available within ${currentRadius}km after ${config.maxMechanicDispatchAttempts} batches.`,
+        timestamp: now,
+      });
       await db.collection("adminAuditLogs").add({
         id: db.collection("adminAuditLogs").doc().id,
         adminId: "SYSTEM",
@@ -160,27 +180,29 @@ export async function dispatchServiceRequest(
         targetType: "SERVICE_REQUEST",
         targetId: requestId,
         details: {
-          batchesAttempted: batchNumber,
+          batchesAttempted: config.maxMechanicDispatchAttempts,
           radiusKm: currentRadius,
           vehicleType: request.vehicleType,
           serviceCategory: request.serviceCategory,
           locality: config.localityName,
         },
-        timestamp: Date.now(),
+        timestamp: now,
       });
+      sendNotificationToUser(db, request.customerId, "CUSTOMER", {
+        title: "No Mechanics Available Nearby",
+        body: "All nearby verified mechanics are currently occupied. Tap Retry Search to expand search radius.",
+        data: { requestId, type: "DISPATCH_EXPIRED" },
+      }).catch(() => {});
     }
-
     return {
       dispatchedCount: 0,
+      expired: reachedMax,
       message: `No eligible mechanics found within ${currentRadius}km.`,
     };
   }
 
-  // Select up to initialOfferBatchSize candidates
   const selectedBatch = candidates.slice(0, config.initialOfferBatchSize);
-  const now = Date.now();
   const expiresAt = now + config.offerTimeoutSeconds * 1000;
-
   const batchWrite = db.batch();
 
   for (const item of selectedBatch) {
@@ -191,6 +213,12 @@ export async function dispatchServiceRequest(
       mechanicId: item.mechanic.mechanicId,
       mechanicName: item.mechanic.name,
       distanceKm: item.distanceKm,
+      vehicleType: request.vehicleType,
+      vehicleMakeModel: request.vehicleMakeModel || request.vehicleType,
+      serviceCategory: request.serviceCategory,
+      issueTitle: request.issueTitle || request.serviceCategory,
+      locality: request.location?.city || request.location?.address || config.localityName,
+      estimatedPriceInr: request.estimatedPriceInr || 349,
       status: "PENDING",
       offeredAt: now,
       expiresAt,
@@ -198,16 +226,15 @@ export async function dispatchServiceRequest(
     batchWrite.set(db.collection("jobOffers").doc(offerId), offer);
   }
 
-  // Update request with current batch and radius
   batchWrite.update(reqRef, {
-    dispatchBatch: batchNumber,
+    status: "SEARCHING",
+    dispatchBatch: attemptBatch,
     searchRadiusKm: currentRadius,
     updatedAt: now,
   });
 
   await batchWrite.commit();
 
-  // Send push notification to the chosen mechanics
   for (const item of selectedBatch) {
     sendNotificationToUser(db, item.mechanic.mechanicId, "MECHANIC", {
       title: "🚨 New Roadside Job Offer!",
@@ -217,28 +244,28 @@ export async function dispatchServiceRequest(
         type: "NEW_JOB_OFFER",
         expiresAt: expiresAt.toString(),
       },
-    }).catch((err) => console.error(`[FCM Offer Error]`, err));
+    }).catch((err) => console.error("[FCM Offer Error]", err));
   }
 
   return {
     dispatchedCount: selectedBatch.length,
-    message: `Dispatched ${selectedBatch.length} offers within ${currentRadius}km.`,
+    expired: false,
+    message: `Dispatched ${selectedBatch.length} offers within ${currentRadius}km (Batch ${attemptBatch}).`,
   };
 }
 
-/**
- * Handle expired offers and trigger subsequent batch expansion if unassigned
- */
 export async function handleExpiredOffers(
   db: admin.firestore.Firestore,
   requestId: string
-): Promise<void> {
+): Promise<{ expanded: boolean; expired: boolean; dispatchedCount: number }> {
   const reqRef = db.collection("serviceRequests").doc(requestId);
   const reqDoc = await reqRef.get();
-  if (!reqDoc.exists) return;
+  if (!reqDoc.exists) return { expanded: false, expired: false, dispatchedCount: 0 };
 
   const request = reqDoc.data() as ServiceRequest;
-  if (request.status !== "SEARCHING") return;
+  if (request.status !== "SEARCHING") {
+    return { expanded: false, expired: false, dispatchedCount: 0 };
+  }
 
   const now = Date.now();
   const offersSnapshot = await db
@@ -249,7 +276,6 @@ export async function handleExpiredOffers(
 
   let hasPendingNonExpired = false;
   const batchWrite = db.batch();
-
   offersSnapshot.forEach((doc) => {
     const offer = doc.data() as JobOffer;
     if (offer.expiresAt <= now) {
@@ -258,18 +284,63 @@ export async function handleExpiredOffers(
       hasPendingNonExpired = true;
     }
   });
-
   await batchWrite.commit();
 
-  // If no remaining pending offers and still searching, expand radius to next batch
   if (!hasPendingNonExpired && request.status === "SEARCHING") {
     const nextBatch = (request.dispatchBatch || 1) + 1;
     const config = await getApplicationConfig(db);
     if (nextBatch <= config.maxMechanicDispatchAttempts) {
-      console.log(`[Dispatch] Batch ${request.dispatchBatch} expired. Expanding to batch ${nextBatch}...`);
-      await dispatchServiceRequest(db, requestId, nextBatch);
+      const res = await dispatchServiceRequest(db, requestId, nextBatch);
+      return { expanded: true, expired: res.expired, dispatchedCount: res.dispatchedCount };
     } else {
-      console.log(`[Dispatch] All dispatch attempts exhausted for ${requestId}.`);
+      await reqRef.update({ status: "EXPIRED", updatedAt: now });
+      return { expanded: false, expired: true, dispatchedCount: 0 };
     }
   }
+  return { expanded: false, expired: false, dispatchedCount: 0 };
+}
+
+export async function handleRejectJobOffer(
+  data: { offerId: string; reason?: string },
+  context: functions.https.CallableContext,
+  db: admin.firestore.Firestore
+): Promise<{ success: boolean; message: string }> {
+  const caller = await assertCallerRole(context, db, ["MECHANIC"]);
+  if (!data?.offerId) {
+    throw new functions.https.HttpsError("invalid-argument", "offerId is required.");
+  }
+  const offerRef = db.collection("jobOffers").doc(data.offerId);
+  const offerDoc = await offerRef.get();
+  if (!offerDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Offer not found.");
+  }
+  const offer = offerDoc.data() as JobOffer;
+  if (offer.mechanicId !== caller.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Cannot reject another mechanic's offer.");
+  }
+  if (offer.status !== "PENDING") {
+    return { success: true, message: `Offer already ${offer.status}.` };
+  }
+  const now = Date.now();
+  await offerRef.update({
+    status: "REJECTED",
+    respondedAt: now,
+    rejectionReason: data.reason || "Declined by mechanic",
+  });
+
+  // Check if any other PENDING offers remain; if not, expand dispatch batch
+  const remaining = await db
+    .collection("jobOffers")
+    .where("requestId", "==", offer.requestId)
+    .where("status", "==", "PENDING")
+    .get();
+  if (remaining.empty) {
+    const reqDoc = await db.collection("serviceRequests").doc(offer.requestId).get();
+    if (reqDoc.exists && reqDoc.data()?.status === "SEARCHING") {
+      const nextBatch = ((reqDoc.data()?.dispatchBatch as number) || 1) + 1;
+      await dispatchServiceRequest(db, offer.requestId, nextBatch).catch(() => {});
+    }
+  }
+
+  return { success: true, message: "Offer declined." };
 }

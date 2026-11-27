@@ -5,17 +5,37 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.model.MechanicApprovalStatus
 import com.example.model.ServiceRequestStatus
 import com.example.viewmodel.AdminViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class ExampleRobolectricTest {
+
+  private val testDispatcher = UnconfinedTestDispatcher()
+
+  @Before
+  fun setup() {
+    Dispatchers.setMain(testDispatcher)
+  }
+
+  @After
+  fun tearDown() {
+    Dispatchers.resetMain()
+  }
 
   @Test
   fun `read string from context`() {
@@ -25,8 +45,8 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `admin viewmodel loads initial fleet and requests`() {
-    val vm = AdminViewModel()
+  fun `admin viewmodel loads repository fleet and requests`() {
+    val vm = AdminViewModel(FakeInMemoryAdminRepository())
     assertTrue(vm.mechanics.value.isNotEmpty())
     assertTrue(vm.requests.value.isNotEmpty())
     assertTrue(vm.auditLogs.value.isNotEmpty())
@@ -34,7 +54,7 @@ class ExampleRobolectricTest {
 
   @Test
   fun `admin viewmodel parses and validates csv with duplicate detection`() {
-    val vm = AdminViewModel()
+    val vm = AdminViewModel(FakeInMemoryAdminRepository())
     val testCsv = """
       name,phone,email,vehicleTypes,serviceCategories,locality,lat,lng
       Test Mechanic,9819999991,test@example.com,"TWO_WHEELER","FLAT_TYRE",Sector 29 Gurugram,28.45,77.02
@@ -46,16 +66,13 @@ class ExampleRobolectricTest {
     assertEquals(1, result.validRows.size)
     assertEquals(1, result.duplicateCount)
     assertEquals(2, result.invalidRows.size)
-
-    // Check newly parsed mechanic starts strictly in PENDING status
     assertEquals(MechanicApprovalStatus.PENDING, result.validRows[0].approvalStatus)
   }
 
   @Test
   fun `admin viewmodel updates mechanic approval status and records audit log`() {
-    val vm = AdminViewModel()
+    val vm = AdminViewModel(FakeInMemoryAdminRepository())
     val pendingMech = vm.mechanics.value.first { it.approvalStatus == MechanicApprovalStatus.PENDING }
-
     vm.updateMechanicStatus(pendingMech.id, MechanicApprovalStatus.APPROVED, "Verified by Admin")
 
     val updated = vm.mechanics.value.first { it.id == pendingMech.id }
@@ -67,17 +84,18 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `admin viewmodel simulates roadside dispatch and atomic assignment`() {
-    val vm = AdminViewModel()
+  fun `admin viewmodel dispatches roadside request`() {
+    val vm = AdminViewModel(FakeInMemoryAdminRepository())
     val prevCount = vm.requests.value.size
-
     vm.simulateRequest("FOUR_WHEELER_CAR", "BATTERY_JUMPSTART", "Sector 29 Gurugram Hub")
 
     val newRequests = vm.requests.value
     assertEquals(prevCount + 1, newRequests.size)
-
     val newest = newRequests.first()
     assertNotNull(newest.id)
-    assertTrue(newest.status == ServiceRequestStatus.ASSIGNED || newest.status == ServiceRequestStatus.SEARCHING)
+    assertTrue(
+      newest.status == ServiceRequestStatus.ASSIGNED ||
+        newest.status == ServiceRequestStatus.SEARCHING
+    )
   }
 }

@@ -1,18 +1,8 @@
-/**
- * FixMechanic Atomic Job Acceptance (Highest Priority)
- * Concurrency-safe Firestore Transaction ensuring strictly one winning mechanic.
- * Handles race conditions, offer validation, winner selection, competing offer cancellation,
- * audit logging, chat initialization, and idempotency.
- */
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
-import {
-  ServiceRequest,
-  MechanicProfile,
-  JobOffer,
-  JobAssignment,
-} from "./types";
+import { JobAssignment, JobOffer, MechanicProfile, ServiceRequest } from "./types";
 import { assertCallerRole } from "./auth";
+import { maskDisplayName, maskPhoneNumber } from "./config";
 import { sendNotificationToUser } from "./notifications";
 
 export interface AcceptJobOfferInput {
@@ -33,30 +23,22 @@ export async function handleAcceptJobOffer(
   context: functions.https.CallableContext,
   db: admin.firestore.Firestore
 ): Promise<AcceptJobOfferResult> {
-  // 1. Authenticate mechanic
   const caller = await assertCallerRole(context, db, ["MECHANIC"]);
   const mechanicId = caller.uid;
 
-  if (!data.offerId || typeof data.offerId !== "string") {
-    throw new functions.https.HttpsError(
-      "invalid-argument",
-      "Offer ID is required."
-    );
+  if (!data?.offerId || typeof data.offerId !== "string") {
+    throw new functions.https.HttpsError("invalid-argument", "Offer ID is required.");
   }
 
   const offerRef = db.collection("jobOffers").doc(data.offerId);
 
-  // Execute concurrency-safe Firestore transaction
   const result = await db.runTransaction(async (transaction) => {
-    // 2. Read Offer
     const offerDoc = await transaction.get(offerRef);
     if (!offerDoc.exists) {
       throw new functions.https.HttpsError("not-found", "Job offer not found.");
     }
-
     const offer = offerDoc.data() as JobOffer;
 
-    // Idempotency check: If already accepted by this exact mechanic, return success idempotently
     if (offer.status === "ACCEPTED" && offer.mechanicId === mechanicId) {
       return {
         success: true,
@@ -65,10 +47,11 @@ export async function handleAcceptJobOffer(
         status: "ASSIGNED",
         message: "You have already accepted this job.",
         idempotent: true,
+        customerId: "",
+        mechanicName: offer.mechanicName || "",
       };
     }
 
-    // 3. Verify offer belongs to calling mechanic
     if (offer.mechanicId !== mechanicId) {
       throw new functions.https.HttpsError(
         "permission-denied",
@@ -76,7 +59,6 @@ export async function handleAcceptJobOffer(
       );
     }
 
-    // Check if offer is still pending
     if (offer.status !== "PENDING") {
       throw new functions.https.HttpsError(
         "failed-precondition",
@@ -84,7 +66,6 @@ export async function handleAcceptJobOffer(
       );
     }
 
-    // 4. Verify offer has not expired
     const now = Date.now();
     if (offer.expiresAt <= now) {
       transaction.update(offerRef, { status: "EXPIRED", respondedAt: now });
@@ -94,16 +75,16 @@ export async function handleAcceptJobOffer(
       );
     }
 
-    // 5. Verify mechanic profile & approved status
     const mechanicRef = db.collection("mechanicProfiles").doc(mechanicId);
-    const mechanicDoc = await transaction.get(mechanicRef);
-    if (!mechanicDoc.exists) {
-      throw new functions.https.HttpsError(
-        "permission-denied",
-        "Mechanic profile not found."
-      );
-    }
+    const reqRef = db.collection("serviceRequests").doc(offer.requestId);
 
+    // Perform ALL transaction reads BEFORE writes
+    const mechanicDoc = await transaction.get(mechanicRef);
+    const reqDoc = await transaction.get(reqRef);
+
+    if (!mechanicDoc.exists) {
+      throw new functions.https.HttpsError("permission-denied", "Mechanic profile not found.");
+    }
     const mechanic = mechanicDoc.data() as MechanicProfile;
     if (mechanic.approvalStatus !== "APPROVED") {
       throw new functions.https.HttpsError(
@@ -111,7 +92,6 @@ export async function handleAcceptJobOffer(
         `Mechanic is not approved for live dispatches (Status: ${mechanic.approvalStatus}).`
       );
     }
-
     if (mechanic.isBusy || mechanic.activeJobId) {
       throw new functions.https.HttpsError(
         "failed-precondition",
@@ -119,25 +99,18 @@ export async function handleAcceptJobOffer(
       );
     }
 
-    // 6. Read Request & verify still available and unassigned
-    const reqRef = db.collection("serviceRequests").doc(offer.requestId);
-    const reqDoc = await transaction.get(reqRef);
     if (!reqDoc.exists) {
       throw new functions.https.HttpsError("not-found", "Service request not found.");
     }
-
     const request = reqDoc.data() as ServiceRequest;
 
-    // Check availability
     if (request.status !== "SEARCHING" && request.status !== "REQUESTED") {
-      // Conflict: Another mechanic accepted first or request cancelled
       transaction.update(offerRef, { status: "LOST", respondedAt: now });
       throw new functions.https.HttpsError(
         "aborted",
-        `Job is no longer available. It was already assigned to another mechanic or cancelled.`
+        "This request has already been assigned to another mechanic."
       );
     }
-
     if (request.assignedMechanicId) {
       transaction.update(offerRef, { status: "LOST", respondedAt: now });
       throw new functions.https.HttpsError(
@@ -146,39 +119,47 @@ export async function handleAcceptJobOffer(
       );
     }
 
-    // 7. Atomically assign request to this mechanic
+    const maskedMechanicPhone = maskPhoneNumber(mechanic.phone);
+
     transaction.update(reqRef, {
       status: "ASSIGNED",
       assignedMechanicId: mechanicId,
       assignedMechanicName: mechanic.name,
+      assignedMechanicPhoneMasked: maskedMechanicPhone,
+      assignedMechanicLocation: mechanic.currentLocation || null,
       updatedAt: now,
     });
 
-    // 8. Update winning offer record
     transaction.update(offerRef, {
       status: "ACCEPTED",
       respondedAt: now,
     });
 
-    // 9. Update mechanic busy state
     transaction.update(mechanicRef, {
       isBusy: true,
       activeJobId: offer.requestId,
+      updatedAt: now,
     });
 
-    // 10. Create authoritative job assignment record
     const assignmentRef = db.collection("jobAssignments").doc(offer.requestId);
     const assignment: JobAssignment = {
       id: offer.requestId,
       requestId: offer.requestId,
       mechanicId,
       customerId: request.customerId,
+      customerDisplayName: maskDisplayName(request.customerName),
+      customerPhoneMasked: maskPhoneNumber(request.customerPhone),
+      vehicleType: request.vehicleType || "TWO_WHEELER",
+      vehicleMakeModel: request.vehicleMakeModel || "Vehicle",
+      vehicleRegNumber: request.vehicleRegNumber || "UNREGISTERED",
+      serviceCategory: request.serviceCategory || "OTHER",
+      issueTitle: request.issueTitle || request.serviceCategory || "Roadside Repair",
+      estimatedPriceInr: request.estimatedPriceInr ?? 349,
       assignedAt: now,
       initialAcceptedAt: now,
     };
     transaction.set(assignmentRef, assignment);
 
-    // 11. Record immutable status transition event
     const statusEventRef = db.collection("jobStatusEvents").doc();
     transaction.set(statusEventRef, {
       id: statusEventRef.id,
@@ -191,7 +172,6 @@ export async function handleAcceptJobOffer(
       timestamp: now,
     });
 
-    // 12. Initialize secure job chat
     const chatRef = db.collection("jobChats").doc(offer.requestId);
     transaction.set(chatRef, {
       id: offer.requestId,
@@ -202,7 +182,6 @@ export async function handleAcceptJobOffer(
       createdAt: now,
     });
 
-    // 13. Audit log entry
     const auditRef = db.collection("adminAuditLogs").doc();
     transaction.set(auditRef, {
       id: auditRef.id,
@@ -225,19 +204,17 @@ export async function handleAcceptJobOffer(
       assignedMechanicId: mechanicId,
       status: "ASSIGNED",
       message: "Job offer accepted successfully! You are now assigned to this roadside request.",
+      idempotent: false,
       customerId: request.customerId,
       mechanicName: mechanic.name,
     };
   });
 
-  // Post-transaction tasks (non-blocking for atomic transaction guarantee):
-  // Mark all competing pending offers for this request as LOST
   markCompetingOffersAsLost(db, result.requestId, data.offerId).catch((err) =>
     console.error("[Competing Offers Update Error]", err)
   );
 
-  // Notify Customer that mechanic is assigned
-  if ("customerId" in result && result.customerId) {
+  if (result.customerId) {
     sendNotificationToUser(db, result.customerId, "CUSTOMER", {
       title: "🚗 Mechanic Assigned!",
       body: `${result.mechanicName || "Your mechanic"} has accepted your roadside assistance request.`,
@@ -250,7 +227,7 @@ export async function handleAcceptJobOffer(
   }
 
   return {
-    success: true,
+    success: result.success,
     requestId: result.requestId,
     assignedMechanicId: result.assignedMechanicId,
     status: result.status,
@@ -259,9 +236,6 @@ export async function handleAcceptJobOffer(
   };
 }
 
-/**
- * Mark all other pending offers for this request as LOST
- */
 async function markCompetingOffersAsLost(
   db: admin.firestore.Firestore,
   requestId: string,
@@ -284,7 +258,7 @@ async function markCompetingOffersAsLost(
         status: "LOST",
         respondedAt: now,
       });
-      // Optionally notify other mechanics that the job was taken
+
       const otherMechId = doc.data().mechanicId;
       sendNotificationToUser(db, otherMechId, "MECHANIC", {
         title: "Job Taken",

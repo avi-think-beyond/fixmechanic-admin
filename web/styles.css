@@ -839,3 +839,55 @@ body {
   display: flex;
   gap: 0.75rem;
 }
+
+/* Live Auth & Spark Backend Status */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.78);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 1.5rem;
+}
+.auth-overlay.hidden {
+  display: none;
+}
+.auth-modal-card {
+  width: 100%;
+  max-width: 440px;
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 1.75rem;
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.35);
+}
+.auth-error-banner {
+  background: #FEE2E2;
+  color: #991B1B;
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  display: none;
+}
+.auth-error-banner.visible {
+  display: block;
+}
+.conn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  background: #DCFCE7;
+  color: #166534;
+}
+.conn-pill.offline {
+  background: #FEE2E2;
+  color: #991B1B;
+}

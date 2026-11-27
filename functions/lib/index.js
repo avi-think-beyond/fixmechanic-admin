@@ -33,15 +33,14 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onUserCreated = exports.triggerOfferExpiryCheck = exports.adminCancelOrReassign = exports.processMechanicsCsv = exports.updateMechanicStatus = exports.sendJobChatMessage = exports.updateJobStatus = exports.acceptJobOffer = exports.createServiceRequest = void 0;
-/**
- * FixMechanic Cloud Functions Entrypoint
- * Exports all trusted backend endpoints, triggers, and scheduled jobs.
- */
+exports.onUserCreated = exports.triggerOfferExpiryCheck = exports.updateApplicationConfig = exports.adminCancelOrReassign = exports.processMechanicsCsv = exports.updateMechanicStatus = exports.updateMechanicLocation = exports.submitJobRating = exports.sendJobChatMessage = exports.updateJobStatus = exports.rejectJobOffer = exports.acceptJobOffer = exports.retryServiceRequest = exports.createServiceRequest = void 0;
 const functions = __importStar(require("firebase-functions"));
 const admin = __importStar(require("firebase-admin"));
-admin.initializeApp();
+if (admin.apps.length === 0) {
+    admin.initializeApp();
+}
 const db = admin.firestore();
+db.settings({ ignoreUndefinedProperties: true });
 const requestService_1 = require("./requestService");
 const atomicAcceptance_1 = require("./atomicAcceptance");
 const jobStatusMachine_1 = require("./jobStatusMachine");
@@ -49,66 +48,52 @@ const chatService_1 = require("./chatService");
 const mechanicAdmin_1 = require("./mechanicAdmin");
 const dispatchEngine_1 = require("./dispatchEngine");
 const auth_1 = require("./auth");
-/**
- * 1. Customer Request Creation Endpoint
- */
 exports.createServiceRequest = functions.https.onCall(async (data, context) => {
     return await (0, requestService_1.handleCreateServiceRequest)(data, context, db);
 });
-/**
- * 2. Atomic Job Acceptance Endpoint (Highest Priority)
- */
+exports.retryServiceRequest = functions.https.onCall(async (data, context) => {
+    return await (0, requestService_1.handleRetryServiceRequest)(data, context, db);
+});
 exports.acceptJobOffer = functions.https.onCall(async (data, context) => {
     return await (0, atomicAcceptance_1.handleAcceptJobOffer)(data, context, db);
 });
-/**
- * 3. Authoritative Job Status Machine Endpoint
- */
+exports.rejectJobOffer = functions.https.onCall(async (data, context) => {
+    return await (0, dispatchEngine_1.handleRejectJobOffer)(data, context, db);
+});
 exports.updateJobStatus = functions.https.onCall(async (data, context) => {
     return await (0, jobStatusMachine_1.handleUpdateJobStatus)(data, context, db);
 });
-/**
- * 4. Private Job Chat Message Endpoint
- */
 exports.sendJobChatMessage = functions.https.onCall(async (data, context) => {
     return await (0, chatService_1.handleSendJobChatMessage)(data, context, db);
 });
-/**
- * 5. Admin: Update Mechanic Verification Status (Approve/Reject/Suspend)
- */
+exports.submitJobRating = functions.https.onCall(async (data, context) => {
+    return await (0, mechanicAdmin_1.handleSubmitJobRating)(data, context, db);
+});
+exports.updateMechanicLocation = functions.https.onCall(async (data, context) => {
+    return await (0, mechanicAdmin_1.handleUpdateMechanicLocation)(data, context, db);
+});
 exports.updateMechanicStatus = functions.https.onCall(async (data, context) => {
     return await (0, mechanicAdmin_1.handleUpdateMechanicStatus)(data, context, db);
 });
-/**
- * 6. Admin: Process Mechanics CSV Import (Validate, Preview & Commit)
- */
 exports.processMechanicsCsv = functions.https.onCall(async (data, context) => {
     return await (0, mechanicAdmin_1.handleProcessMechanicsCsv)(data, context, db);
 });
-/**
- * 7. Admin: Emergency Cancel or Reassign Service Request
- */
 exports.adminCancelOrReassign = functions.https.onCall(async (data, context) => {
     return await (0, mechanicAdmin_1.handleAdminCancelOrReassign)(data, context, db);
 });
-/**
- * 8. Scheduled / HTTP Job: Check Offer Expirations and Expand Radius
- */
-exports.triggerOfferExpiryCheck = functions.https.onCall(async (data, context) => {
+exports.updateApplicationConfig = functions.https.onCall(async (data, context) => {
+    return await (0, mechanicAdmin_1.handleUpdateApplicationConfig)(data, context, db);
+});
+exports.triggerOfferExpiryCheck = functions.https.onCall(async (data) => {
     if (!data?.requestId) {
         throw new functions.https.HttpsError("invalid-argument", "requestId is required.");
     }
-    await (0, dispatchEngine_1.handleExpiredOffers)(db, data.requestId);
-    return { success: true };
+    return await (0, dispatchEngine_1.handleExpiredOffers)(db, data.requestId);
 });
-/**
- * 9. Auth Trigger: Initialize user record on account registration
- */
 exports.onUserCreated = functions.auth.user().onCreate(async (user) => {
     const userRef = db.collection("users").doc(user.uid);
     const existing = await userRef.get();
     if (!existing.exists) {
-        // Default new self-registrations to CUSTOMER unless provisioned by admin
         const role = "CUSTOMER";
         await userRef.set({
             uid: user.uid,
@@ -117,8 +102,9 @@ exports.onUserCreated = functions.auth.user().onCreate(async (user) => {
             phone: user.phoneNumber || null,
             displayName: user.displayName || "New User",
             createdAt: Date.now(),
+            updatedAt: Date.now(),
         });
-        await (0, auth_1.syncUserClaims)(user.uid, role);
+        await (0, auth_1.syncUserClaims)(user.uid, role).catch(() => { });
     }
 });
 //# sourceMappingURL=index.js.map

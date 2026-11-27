@@ -1,95 +1,60 @@
-# FixMechanic Backend & Admin Console — Deployment Guide
+# FixMechanic Unified Backend & Apps — Setup & Deployment Guide
 
-## 1. Prerequisites and Project Architecture
+## 1. Shared Firebase Project
+All apps connect to:
+- **Firebase Project ID**: `fixmechanic-firebase`
+- **Project Number**: `111465055412`
+- **Firestore Database**: `(default)`
 
-The FixMechanic architecture consists of:
-- **Cloud Firestore**: High-durability NoSQL store with deny-by-default zero-trust security rules (`firestore.rules`).
-- **Firebase Authentication**: User identity with server-managed custom claims (`role: 'CUSTOMER' | 'MECHANIC' | 'ADMIN'`).
-- **Firebase Cloud Functions (TypeScript)**: Trusted business logic for customer request creation, geospatial dispatch matching, concurrency-safe atomic job acceptance, authoritative status machine enforcement, and admin fleet verification.
-- **Firebase Cloud Messaging (FCM)**: Push notification dispatch for new offers, acceptance outcomes, status changes, and chat messages.
-- **Admin Operations Console**:
-  - **Web Dashboard**: Responsive browser-based console in `/web` deployable via Firebase Hosting.
-  - **Android Native Admin App**: Jetpack Compose operations application for mobile fleet control and field dispatchers.
+> Place each app's downloaded `google-services.json` locally in `app/google-services.json` (git-ignored, never committed).
 
 ---
 
-## 2. Firebase Configuration & Deployment Steps
+## 2. Running on Firebase Spark (No-Cost Plan)
 
-### Step 2.1: Firebase Project Setup
-1. Create a Firebase project at [https://console.firebase.google.com](https://console.firebase.google.com).
-2. Enable the **Blaze (Pay-as-you-go)** billing plan (required by Google Cloud for Node.js 18+ Cloud Functions and external network calls, though remaining well within the generous monthly free tier of 2M function invocations).
-3. Enable **Authentication** in Firebase Console:
-   - Enable **Email/Password** and **Google Sign-In** under Sign-in method.
-4. Enable **Cloud Firestore** in production mode:
-   - Select cloud region (recommended: `asia-south1` for Mumbai/Delhi locality latency minimization).
+### 2.1 Firebase Console (Spark)
+1. Enable **Cloud Firestore** (`(default)` database).
+2. Enable **Authentication** sign-in providers: **Email/Password** and **Google**.
+   - *Phone SMS OTP requires upgrading to Blaze billing; on Spark, all apps use Email/Password and Google Sign-In.*
+3. Deploy Firestore rules and indexes from `fixmechanic-admin`:
+   ```bash
+   firebase deploy --only firestore:rules,firestore:indexes --project fixmechanic-firebase
+   ```
 
-### Step 2.2: Local Configuration & Firebase CLI
-Install and authenticate Firebase CLI:
-```bash
-npm install -g firebase-tools
-firebase login
-```
-
-Link your project:
-```bash
-firebase use --add <your-firebase-project-id>
-```
-
-### Step 2.3: Deploying Firestore Security Rules & Composite Indexes
-Deploy the security rules and composite indexes:
-```bash
-firebase deploy --only firestore:rules,firestore:indexes
-```
-
-### Step 2.4: Compiling & Deploying Cloud Functions
-Navigate to the functions directory, install dependencies, compile TypeScript, and deploy:
+### 2.2 Running the Spark Dispatch Backend Server Locally (or on Any Node Host)
+Because Cloud Functions deployment requires Blaze, the TypeScript dispatch engine runs on Spark via the standalone HTTP Callable server (`functions/src/server.ts`):
 ```bash
 cd functions
 npm install
 npm run build
-firebase deploy --only functions
+# Against local Firebase Emulators:
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 GCLOUD_PROJECT=fixmechanic-firebase PORT=5055 node lib/server.js
 ```
+All three Android apps default `BuildConfig.BACKEND_BASE_URL` to `http://10.0.2.2:5055` for Android Emulator testing.
 
-### Step 2.5: Deploying Web Admin Dashboard
-Deploy the responsive admin web console to Firebase Hosting:
+### 2.3 Local Firebase Emulators & Automated Verification
 ```bash
-firebase deploy --only hosting
+# Terminal 1: Start Auth (9099) & Firestore (8085) emulators
+firebase emulators:start --config firebase.json --only auth,firestore --project fixmechanic-firebase
+
+# Terminal 2: Start Spark dispatch server (5055)
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 GCLOUD_PROJECT=fixmechanic-firebase PORT=5055 node functions/lib/server.js
+
+# Terminal 3: Run backend unit + E2E tests
+node --test functions/tests/test_suite.js functions/tests/e2e_emulator.test.js
 ```
 
----
-
-## 3. Environment & Secret Configuration
-
-1. **Service Account Credentials**:
-   When running in Firebase Cloud Functions or Google Cloud Run, default application credentials (`admin.initializeApp()`) are injected automatically.
-2. **Android Client Secrets**:
-   Copy the `google-services.json` file downloaded from Firebase Console into `app/google-services.json`.
-
----
-
-## 4. Bootstrapping Initial Admin Account
-
-To promote the first administrative user safely without exposing elevated credentials:
+### 2.4 Web Admin Console (`/web`)
+Serve `web/` locally (or deploy via `firebase deploy --only hosting`):
 ```bash
-# Using Firebase Admin Node.js CLI or Cloud Functions shell
-npm --prefix functions run shell
-
-# In functions shell:
-admin.auth().getUserByEmail('admin@fixmechanic.in').then(u => {
-  return admin.auth().setCustomUserClaims(u.uid, { role: 'ADMIN', admin: true });
-});
+npx serve web -p 5173
 ```
+When opened on `localhost` / `127.0.0.1`, `web/firebase-config.js` automatically connects to local Auth (`9099`), Firestore (`8085`), and Spark Backend (`5055`). Enter your Firebase Web API key / App ID in the Auth Gate runtime settings dialog when targeting a live Firebase project.
 
 ---
 
-## 5. Mechanic Onboarding & CSV Import Process
-
-1. Open the Admin Console (Web or Android).
-2. Navigate to **Mechanic Fleet**.
-3. Click **CSV Import** and select `sample_mechanics.csv`.
-4. The system validates:
-   - Valid phone numbers (10 digits).
-   - Duplicate prevention (against existing database and within batch).
-   - Valid vehicle categories and service codes.
-5. All newly imported mechanics begin strictly in **PENDING** approval status.
-6. Admins review credentials and click **Approve** to activate the mechanic for live dispatches.
+## 3. Upgrading to Blaze (Optional Production Cloud Functions)
+When ready to deploy serverless Cloud Functions directly to Google Cloud:
+1. Upgrade `fixmechanic-firebase` to Blaze in Firebase Console.
+2. Run `firebase deploy --only functions --project fixmechanic-firebase`.
+3. Optionally enable Firebase Phone Authentication if SMS OTP is desired.

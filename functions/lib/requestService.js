@@ -34,36 +34,17 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.handleCreateServiceRequest = handleCreateServiceRequest;
-/**
- * Trusted Customer Request Creation
- * Validates authenticated customer, checks locality constraints, prevents duplicate
- * submissions, records initial status event, and triggers the dispatch engine.
- */
+exports.handleRetryServiceRequest = handleRetryServiceRequest;
 const functions = __importStar(require("firebase-functions"));
 const auth_1 = require("./auth");
 const config_1 = require("./config");
 const dispatchEngine_1 = require("./dispatchEngine");
-const SUPPORTED_VEHICLE_TYPES = [
-    "TWO_WHEELER",
-    "FOUR_WHEELER_CAR",
-    "COMMERCIAL_LIGHT",
-    "EV_TWO_WHEELER",
-    "EV_FOUR_WHEELER",
-];
 async function handleCreateServiceRequest(data, context, db) {
-    // 1. Authenticate and verify role is CUSTOMER
-    const caller = await (0, auth_1.assertCallerRole)(context, db, ["CUSTOMER"]);
+    const caller = await (0, auth_1.assertCallerRole)(context, db, ["CUSTOMER", "ADMIN"]);
     const customerId = caller.uid;
-    // 2. Validate input fields
-    if (!data.vehicleType || !SUPPORTED_VEHICLE_TYPES.includes(data.vehicleType)) {
-        throw new functions.https.HttpsError("invalid-argument", `Invalid vehicle type: ${data.vehicleType}`);
-    }
-    if (!data.vehicleRegNumber || data.vehicleRegNumber.trim().length < 3) {
-        throw new functions.https.HttpsError("invalid-argument", "Valid vehicle registration number is required.");
-    }
-    if (!data.serviceCategory || data.serviceCategory.trim().length === 0) {
-        throw new functions.https.HttpsError("invalid-argument", "Service category is required.");
-    }
+    const vehicleType = (0, config_1.normalizeVehicleType)(data.vehicleType);
+    const serviceCategory = (0, config_1.normalizeServiceCategory)(data.serviceCategory || data.issueTitle);
+    const vehicleRegNumber = (data.vehicleRegNumber || "UNREGISTERED").trim().toUpperCase();
     if (typeof data.lat !== "number" ||
         typeof data.lng !== "number" ||
         isNaN(data.lat) ||
@@ -74,51 +55,72 @@ async function handleCreateServiceRequest(data, context, db) {
         data.lng > 180) {
         throw new functions.https.HttpsError("invalid-argument", "Valid GPS coordinates (latitude & longitude) are required.");
     }
-    // 3. Prevent duplicate active submissions (if customer already has an active request)
-    const activeStatuses = ["REQUESTED", "SEARCHING", "ASSIGNED", "ACCEPTED", "EN_ROUTE", "ARRIVED", "IN_PROGRESS"];
-    const existingActiveSnapshot = await db
-        .collection("serviceRequests")
-        .where("customerId", "==", customerId)
-        .where("status", "in", activeStatuses)
-        .limit(1)
-        .get();
-    if (!existingActiveSnapshot.empty) {
-        const existingReq = existingActiveSnapshot.docs[0];
-        throw new functions.https.HttpsError("already-exists", `You already have an active roadside assistance request (#${existingReq.id.slice(0, 6)}). Please complete or cancel it before initiating a new one.`);
+    if (caller.role === "CUSTOMER") {
+        const activeStatuses = [
+            "REQUESTED",
+            "SEARCHING",
+            "ASSIGNED",
+            "ACCEPTED",
+            "EN_ROUTE",
+            "ARRIVED",
+            "IN_PROGRESS",
+        ];
+        const existingActiveSnapshot = await db
+            .collection("serviceRequests")
+            .where("customerId", "==", customerId)
+            .where("status", "in", activeStatuses)
+            .limit(1)
+            .get();
+        if (!existingActiveSnapshot.empty) {
+            const existingReq = existingActiveSnapshot.docs[0];
+            throw new functions.https.HttpsError("already-exists", `You already have an active roadside assistance request (#${existingReq.id.slice(0, 6)}). Please complete or cancel it before initiating a new one.`);
+        }
     }
-    // 4. Retrieve customer profile phone number for verified contact
     const customerDoc = await db.collection("customerProfiles").doc(customerId).get();
+    const userDoc = await db.collection("users").doc(customerId).get();
     const customerData = customerDoc.data();
-    const customerPhone = customerData?.phone || caller.email || "Verified App User";
-    const customerName = customerData?.name || "Customer";
-    // 5. Build authoritative Service Request object
+    const userData = userDoc.data();
+    const customerPhone = customerData?.phone || userData?.phone || caller.email || "Verified App User";
+    const customerName = customerData?.name || userData?.displayName || (caller.role === "ADMIN" ? "Ops Simulation" : "Customer");
+    const config = await (0, dispatchEngine_1.getApplicationConfig)(db);
     const requestId = db.collection("serviceRequests").doc().id;
     const now = Date.now();
     const geohash = (0, config_1.encodeGeohash)(data.lat, data.lng, 7);
     const newRequest = {
         id: requestId,
-        customerId: customerId, // Server authoritative, ignores any client parameter
+        customerId,
         customerName,
         customerPhone,
-        vehicleType: data.vehicleType,
-        vehicleRegNumber: data.vehicleRegNumber.toUpperCase().trim(),
-        serviceCategory: data.serviceCategory.trim(),
+        vehicleType,
+        vehicleMakeModel: (data.vehicleMakeModel || "Vehicle").trim(),
+        vehicleRegNumber,
+        serviceCategory,
+        issueTitle: (data.issueTitle || serviceCategory).trim(),
         description: data.description ? data.description.trim().slice(0, 500) : "",
+        photoUri: data.photoUri || null,
+        estimatedPriceInr: typeof data.estimatedPriceInr === "number" ? data.estimatedPriceInr : 349,
+        finalPartsFee: 0,
+        totalPaid: 0,
         location: {
             lat: data.lat,
             lng: data.lng,
             address: data.address || "Reported Location via GPS",
+            landmark: data.landmark || "",
+            city: data.city || "Gurugram",
             geohash,
+            isGpsAccurate: data.isGpsAccurate ?? true,
             updatedAt: now,
         },
         status: "SEARCHING",
-        assignedMechanicId: null, // Strictly server managed
+        assignedMechanicId: null,
+        assignedMechanicName: null,
+        assignedMechanicPhoneMasked: null,
+        assignedMechanicLocation: null,
         dispatchBatch: 1,
-        searchRadiusKm: config_1.DEFAULT_CONFIG.defaultSearchRadiusKm,
+        searchRadiusKm: config.defaultSearchRadiusKm || config_1.DEFAULT_CONFIG.defaultSearchRadiusKm,
         createdAt: now,
         updatedAt: now,
     };
-    // 6. Write request and initial status event in a batch
     const batch = db.batch();
     batch.set(db.collection("serviceRequests").doc(requestId), newRequest);
     const statusEventDoc = db.collection("jobStatusEvents").doc();
@@ -128,21 +130,64 @@ async function handleCreateServiceRequest(data, context, db) {
         fromStatus: "REQUESTED",
         toStatus: "SEARCHING",
         actorId: customerId,
-        actorRole: "CUSTOMER",
-        note: `Emergency request initiated for ${data.vehicleType} (${data.serviceCategory})`,
+        actorRole: caller.role,
+        note: `Emergency request initiated for ${vehicleType} (${serviceCategory})`,
         timestamp: now,
     });
     await batch.commit();
-    console.log(`[Request Created] Request ${requestId} initiated by ${customerId}`);
-    // 7. Trigger dispatch engine in background
-    (0, dispatchEngine_1.dispatchServiceRequest)(db, requestId, 1).catch((err) => {
-        console.error(`[Dispatch Trigger Error] Failed to dispatch ${requestId}:`, err);
-    });
+    const dispatchResult = await (0, dispatchEngine_1.dispatchServiceRequest)(db, requestId, 1);
     return {
         success: true,
         requestId,
+        status: dispatchResult.expired ? "EXPIRED" : "SEARCHING",
+        dispatchedCount: dispatchResult.dispatchedCount,
+        message: dispatchResult.dispatchedCount > 0
+            ? `Request created and dispatched to ${dispatchResult.dispatchedCount} nearby mechanic(s).`
+            : dispatchResult.message,
+    };
+}
+async function handleRetryServiceRequest(data, context, db) {
+    const caller = await (0, auth_1.assertCallerRole)(context, db, ["CUSTOMER", "ADMIN"]);
+    if (!data?.requestId) {
+        throw new functions.https.HttpsError("invalid-argument", "requestId is required.");
+    }
+    const reqRef = db.collection("serviceRequests").doc(data.requestId);
+    const reqDoc = await reqRef.get();
+    if (!reqDoc.exists) {
+        throw new functions.https.HttpsError("not-found", "Service request not found.");
+    }
+    const req = reqDoc.data();
+    if (caller.role === "CUSTOMER" && req.customerId !== caller.uid) {
+        throw new functions.https.HttpsError("permission-denied", "You can only retry your own request.");
+    }
+    if (!["EXPIRED", "SEARCHING", "REQUESTED"].includes(req.status)) {
+        throw new functions.https.HttpsError("failed-precondition", `Cannot retry request in status ${req.status}.`);
+    }
+    const now = Date.now();
+    const nextBatch = req.status === "EXPIRED" ? 1 : (req.dispatchBatch || 1) + 1;
+    await reqRef.update({
         status: "SEARCHING",
-        message: "Request successfully created. Dispatching nearby mechanics...",
+        dispatchBatch: nextBatch,
+        updatedAt: now,
+    });
+    const eventRef = db.collection("jobStatusEvents").doc();
+    await eventRef.set({
+        id: eventRef.id,
+        requestId: data.requestId,
+        fromStatus: req.status,
+        toStatus: "SEARCHING",
+        actorId: caller.uid,
+        actorRole: caller.role,
+        note: `Retried mechanic dispatch (Batch ${nextBatch})`,
+        timestamp: now,
+    });
+    const dispatchResult = await (0, dispatchEngine_1.dispatchServiceRequest)(db, data.requestId, nextBatch);
+    return {
+        success: true,
+        requestId: data.requestId,
+        status: dispatchResult.expired ? "EXPIRED" : "SEARCHING",
+        dispatchedCount: dispatchResult.dispatchedCount,
+        message: dispatchResult.message,
     };
 }
 //# sourceMappingURL=requestService.js.map

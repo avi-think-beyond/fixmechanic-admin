@@ -18,10 +18,6 @@
     ],
     "rewrites": [
       {
-        "source": "/api/**",
-        "function": "createServiceRequest"
-      },
-      {
         "source": "**",
         "destination": "/index.html"
       }
@@ -29,20 +25,23 @@
   },
   "emulators": {
     "auth": {
+      "host": "127.0.0.1",
       "port": 9099
     },
     "functions": {
+      "host": "127.0.0.1",
       "port": 5001
     },
     "firestore": {
-      "port": 8080
+      "host": "127.0.0.1",
+      "port": 8085
     },
     "hosting": {
+      "host": "127.0.0.1",
       "port": 5000
     },
     "ui": {
-      "enabled": true,
-      "port": 4000
+      "enabled": false
     }
   }
 }

@@ -1,16 +1,8 @@
-/**
- * Authoritative Job Status State Machine
- * Strictly enforces valid status transitions, role authorizations,
- * immutable audit history, mechanic availability updates, and chat closure.
- */
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
-import {
-  ServiceRequest,
-  ServiceRequestStatus,
-  UserRole,
-} from "./types";
+import { ServiceRequest, ServiceRequestStatus, UserRole } from "./types";
 import { assertCallerRole } from "./auth";
+import { dispatchServiceRequest } from "./dispatchEngine";
 import { sendNotificationToUser } from "./notifications";
 
 export interface UpdateStatusInput {
@@ -18,20 +10,22 @@ export interface UpdateStatusInput {
   targetStatus: ServiceRequestStatus;
   note?: string;
   cancellationReason?: string;
+  finalPartsFee?: number;
+  totalPaid?: number;
 }
 
-// Matrix of allowed state transitions and required roles
 const ALLOWED_TRANSITIONS: Record<
   ServiceRequestStatus,
-  Array<{ to: ServiceRequestStatus; allowedRoles: (UserRole | "SYSTEM")[] }>
+  Array<{ to: ServiceRequestStatus; allowedRoles: UserRole[] }>
 > = {
   REQUESTED: [
-    { to: "SEARCHING", allowedRoles: ["ADMIN", "SYSTEM"] },
-    { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN", "SYSTEM"] },
+    { to: "SEARCHING", allowedRoles: ["ADMIN"] },
+    { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN"] },
   ],
   SEARCHING: [
-    { to: "ASSIGNED", allowedRoles: ["ADMIN", "SYSTEM"] },
-    { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN", "SYSTEM"] },
+    { to: "ASSIGNED", allowedRoles: ["ADMIN"] },
+    { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN"] },
+    { to: "EXPIRED", allowedRoles: ["ADMIN"] },
   ],
   ASSIGNED: [
     { to: "ACCEPTED", allowedRoles: ["MECHANIC", "ADMIN"] },
@@ -43,7 +37,6 @@ const ALLOWED_TRANSITIONS: Record<
   ],
   EN_ROUTE: [
     { to: "ARRIVED", allowedRoles: ["MECHANIC", "ADMIN"] },
-    // Customers can no longer freely cancel without admin review once mechanic is en route
     { to: "CANCELLED", allowedRoles: ["MECHANIC", "ADMIN"] },
   ],
   ARRIVED: [
@@ -54,8 +47,12 @@ const ALLOWED_TRANSITIONS: Record<
     { to: "COMPLETED", allowedRoles: ["MECHANIC", "ADMIN"] },
     { to: "CANCELLED", allowedRoles: ["ADMIN"] },
   ],
-  COMPLETED: [], // Terminal
-  CANCELLED: [], // Terminal
+  COMPLETED: [],
+  CANCELLED: [],
+  EXPIRED: [
+    { to: "SEARCHING", allowedRoles: ["CUSTOMER", "ADMIN"] },
+    { to: "CANCELLED", allowedRoles: ["CUSTOMER", "ADMIN"] },
+  ],
 };
 
 export async function handleUpdateJobStatus(
@@ -67,7 +64,7 @@ export async function handleUpdateJobStatus(
   const actorId = caller.uid;
   const actorRole = caller.role;
 
-  if (!data.requestId || !data.targetStatus) {
+  if (!data?.requestId || !data?.targetStatus) {
     throw new functions.https.HttpsError(
       "invalid-argument",
       "Request ID and target status are required."
@@ -75,8 +72,10 @@ export async function handleUpdateJobStatus(
   }
 
   const reqRef = db.collection("serviceRequests").doc(data.requestId);
+  let reopenDispatchBatch: number | null = null;
+  let notifyTarget: { userId: string; role: UserRole; title: string; body: string } | null = null;
 
-  return await db.runTransaction(async (transaction) => {
+  const result = await db.runTransaction(async (transaction) => {
     const reqDoc = await transaction.get(reqRef);
     if (!reqDoc.exists) {
       throw new functions.https.HttpsError("not-found", "Service request not found.");
@@ -95,7 +94,6 @@ export async function handleUpdateJobStatus(
       };
     }
 
-    // Role-specific ownership checks
     if (actorRole === "CUSTOMER" && request.customerId !== actorId) {
       throw new functions.https.HttpsError(
         "permission-denied",
@@ -110,12 +108,10 @@ export async function handleUpdateJobStatus(
       );
     }
 
-    // Check transition validity in state machine matrix
     const possibleTransitions = ALLOWED_TRANSITIONS[currentStatus] || [];
     const validTransition = possibleTransitions.find(
       (t) => t.to === targetStatus && t.allowedRoles.includes(actorRole)
     );
-
     if (!validTransition) {
       throw new functions.https.HttpsError(
         "failed-precondition",
@@ -124,6 +120,62 @@ export async function handleUpdateJobStatus(
     }
 
     const now = Date.now();
+
+    // If MECHANIC cancels before IN_PROGRESS, release mechanic and reopen for redispatch
+    if (actorRole === "MECHANIC" && targetStatus === "CANCELLED") {
+      const nextBatch = (request.dispatchBatch || 1) + 1;
+      reopenDispatchBatch = nextBatch;
+      transaction.update(reqRef, {
+        status: "SEARCHING",
+        assignedMechanicId: null,
+        assignedMechanicName: null,
+        assignedMechanicPhoneMasked: null,
+        assignedMechanicLocation: null,
+        dispatchBatch: nextBatch,
+        updatedAt: now,
+      });
+      const mechanicRef = db.collection("mechanicProfiles").doc(actorId);
+      transaction.update(mechanicRef, {
+        isBusy: false,
+        activeJobId: null,
+        updatedAt: now,
+      });
+      const eventRef = db.collection("jobStatusEvents").doc();
+      transaction.set(eventRef, {
+        id: eventRef.id,
+        requestId: data.requestId,
+        fromStatus: currentStatus,
+        toStatus: "SEARCHING",
+        actorId,
+        actorRole,
+        note: `Mechanic cancelled (${data.cancellationReason || data.note || "Unavailable"}); re-opened for dispatch.`,
+        timestamp: now,
+      });
+      notifyTarget = {
+        userId: request.customerId,
+        role: "CUSTOMER",
+        title: "Reassigning Mechanic",
+        body: "Your assigned mechanic had to cancel. We are automatically matching the next nearest mechanic.",
+      };
+      return {
+        success: true,
+        fromStatus: currentStatus,
+        toStatus: "SEARCHING",
+        message: "Job released and re-opened for automatic redispatch.",
+      };
+    }
+
+    const isTerminal = targetStatus === "COMPLETED" || targetStatus === "CANCELLED";
+    const mechanicRef =
+      isTerminal && request.assignedMechanicId
+        ? db.collection("mechanicProfiles").doc(request.assignedMechanicId)
+        : null;
+    const chatRef = isTerminal ? db.collection("jobChats").doc(data.requestId) : null;
+
+    // ALL transaction reads MUST precede ALL transaction writes
+    const mechSnap = mechanicRef ? await transaction.get(mechanicRef) : null;
+    const chatSnap = chatRef ? await transaction.get(chatRef) : null;
+
     const updatePayload: Partial<ServiceRequest> = {
       status: targetStatus,
       updatedAt: now,
@@ -131,6 +183,8 @@ export async function handleUpdateJobStatus(
 
     if (targetStatus === "COMPLETED") {
       updatePayload.completedAt = now;
+      if (typeof data.finalPartsFee === "number") updatePayload.finalPartsFee = data.finalPartsFee;
+      if (typeof data.totalPaid === "number") updatePayload.totalPaid = data.totalPaid;
     } else if (targetStatus === "CANCELLED") {
       updatePayload.cancelledAt = now;
       updatePayload.cancelledBy = actorId;
@@ -139,7 +193,6 @@ export async function handleUpdateJobStatus(
 
     transaction.update(reqRef, updatePayload);
 
-    // Record immutable audit event
     const eventRef = db.collection("jobStatusEvents").doc();
     transaction.set(eventRef, {
       id: eventRef.id,
@@ -152,24 +205,46 @@ export async function handleUpdateJobStatus(
       timestamp: now,
     });
 
-    // Terminal status cleanup
-    if (targetStatus === "COMPLETED" || targetStatus === "CANCELLED") {
-      // 1. Release assigned mechanic availability if assigned
-      if (request.assignedMechanicId) {
-        const mechanicRef = db.collection("mechanicProfiles").doc(request.assignedMechanicId);
-        transaction.update(mechanicRef, {
+    if (isTerminal) {
+      if (mechanicRef && mechSnap && mechSnap.exists) {
+        const mechUpdate: Record<string, unknown> = {
           isBusy: false,
           activeJobId: null,
-        });
+          updatedAt: now,
+        };
+        if (targetStatus === "COMPLETED") {
+          const prevJobs = (mechSnap.data()?.totalCompletedJobs as number) || 0;
+          const prevEarnings = (mechSnap.data()?.todayEarningsInr as number) || 0;
+          const payout = data.totalPaid ?? request.estimatedPriceInr ?? 349;
+          mechUpdate.totalCompletedJobs = prevJobs + 1;
+          mechUpdate.todayEarningsInr = prevEarnings + payout;
+        }
+        transaction.update(mechanicRef, mechUpdate);
       }
 
-      // 2. Close private job chat
-      const chatRef = db.collection("jobChats").doc(data.requestId);
-      transaction.update(chatRef, {
-        status: "CLOSED",
-        closedAt: now,
-        closedReason: `Job entered terminal status ${targetStatus}`,
-      });
+      if (chatRef && chatSnap && chatSnap.exists) {
+        transaction.update(chatRef, {
+          status: "CLOSED",
+          closedAt: now,
+          closedReason: `Job entered terminal status ${targetStatus}`,
+        });
+      }
+    }
+
+    if (actorRole === "MECHANIC") {
+      notifyTarget = {
+        userId: request.customerId,
+        role: "CUSTOMER",
+        title: `Job Update: ${targetStatus.replace(/_/g, " ")}`,
+        body: `Your mechanic updated your request status to ${targetStatus.replace(/_/g, " ")}.`,
+      };
+    } else if (actorRole === "CUSTOMER" && targetStatus === "CANCELLED" && request.assignedMechanicId) {
+      notifyTarget = {
+        userId: request.assignedMechanicId,
+        role: "MECHANIC",
+        title: "Job Cancelled by Customer",
+        body: "The customer cancelled this emergency request. You are now available for new offers.",
+      };
     }
 
     return {
@@ -179,4 +254,23 @@ export async function handleUpdateJobStatus(
       message: `Job status transitioned from ${currentStatus} to ${targetStatus}.`,
     };
   });
+
+  if (reopenDispatchBatch !== null) {
+    await dispatchServiceRequest(db, data.requestId, reopenDispatchBatch).catch(console.error);
+  }
+
+  if (notifyTarget) {
+    const target = notifyTarget as { userId: string; role: UserRole; title: string; body: string };
+    sendNotificationToUser(db, target.userId, target.role, {
+      title: target.title,
+      body: target.body,
+      data: {
+        requestId: data.requestId,
+        type: "JOB_STATUS_CHANGED",
+        status: result.toStatus,
+      },
+    }).catch(() => {});
+  }
+
+  return result;
 }

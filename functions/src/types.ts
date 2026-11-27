@@ -1,12 +1,10 @@
-/**
- * FixMechanic Types and Domain Definitions
- * Comprehensive schema definitions for Cloud Firestore collections,
- * roles, and authoritative state transitions.
- */
-
 export type UserRole = "CUSTOMER" | "MECHANIC" | "ADMIN";
 
-export type MechanicApprovalStatus = "PENDING" | "APPROVED" | "REJECTED" | "SUSPENDED";
+export type MechanicApprovalStatus =
+  | "PENDING"
+  | "APPROVED"
+  | "REJECTED"
+  | "SUSPENDED";
 
 export type ServiceRequestStatus =
   | "REQUESTED"
@@ -17,19 +15,31 @@ export type ServiceRequestStatus =
   | "ARRIVED"
   | "IN_PROGRESS"
   | "COMPLETED"
-  | "CANCELLED";
+  | "CANCELLED"
+  | "EXPIRED";
 
-export type JobOfferStatus = "PENDING" | "ACCEPTED" | "LOST" | "EXPIRED" | "CANCELLED";
+export type JobOfferStatus =
+  | "PENDING"
+  | "ACCEPTED"
+  | "REJECTED"
+  | "LOST"
+  | "EXPIRED";
 
-export type JobChatStatus = "OPEN" | "CLOSED";
-
-export type VehicleType = "TWO_WHEELER" | "FOUR_WHEELER_CAR" | "COMMERCIAL_LIGHT" | "EV_TWO_WHEELER" | "EV_FOUR_WHEELER";
+export type VehicleType =
+  | "TWO_WHEELER"
+  | "FOUR_WHEELER_CAR"
+  | "COMMERCIAL_LIGHT"
+  | "EV_TWO_WHEELER"
+  | "EV_FOUR_WHEELER";
 
 export interface GeoLocation {
   lat: number;
   lng: number;
   address?: string;
+  landmark?: string;
+  city?: string;
   geohash?: string;
+  isGpsAccurate?: boolean;
   updatedAt?: number;
 }
 
@@ -39,18 +49,9 @@ export interface UserRecord {
   email?: string;
   phone?: string;
   displayName?: string;
-  createdAt: number;
   disabled?: boolean;
-}
-
-export interface CustomerProfile {
-  customerId: string;
-  name: string;
-  phone: string;
-  defaultVehicleType?: VehicleType;
-  defaultVehicleRegNumber?: string;
-  emergencyContact?: string;
   createdAt: number;
+  updatedAt?: number;
 }
 
 export interface MechanicProfile {
@@ -58,61 +59,60 @@ export interface MechanicProfile {
   name: string;
   phone: string;
   email?: string;
+  workshopName?: string;
   approvalStatus: MechanicApprovalStatus;
-  rejectionReason?: string;
+  rejectionReason?: string | null;
+  statusReason?: string | null;
+  verifiedAt?: number | null;
+  verifiedBy?: string | null;
   isOnline: boolean;
   isBusy: boolean;
   activeJobId?: string | null;
   vehicleTypes: VehicleType[];
   serviceCategories: string[];
-  currentLocation?: GeoLocation;
-  serviceAreaId: string;
+  serviceRadiusKm?: number;
+  experienceYears?: number;
+  verificationIdNumber?: string;
+  currentLocation?: GeoLocation | null;
   ratingAverage: number;
   ratingCount: number;
+  totalCompletedJobs?: number;
+  todayEarningsInr?: number;
   createdAt: number;
-  verifiedAt?: number;
-  verifiedBy?: string;
-}
-
-export interface MechanicServiceArea {
-  id: string;
-  name: string;
-  locality: string;
-  center: { lat: number; lng: number };
-  radiusKm: number;
-  active: boolean;
-}
-
-export interface ServiceCategory {
-  id: string;
-  name: string;
-  code: string;
-  description: string;
-  active: boolean;
-  baseFareEst: number;
+  updatedAt: number;
 }
 
 export interface ServiceRequest {
   id: string;
   customerId: string;
   customerName?: string;
-  customerPhone: string;
+  customerPhone?: string;
   vehicleType: VehicleType;
+  vehicleMakeModel?: string;
   vehicleRegNumber: string;
   serviceCategory: string;
+  issueTitle?: string;
   description?: string;
+  photoUri?: string | null;
+  estimatedPriceInr?: number;
+  finalPartsFee?: number;
+  totalPaid?: number;
+  ratingGiven?: number | null;
+  feedbackComment?: string | null;
   location: GeoLocation;
   status: ServiceRequestStatus;
   assignedMechanicId?: string | null;
   assignedMechanicName?: string | null;
+  assignedMechanicPhoneMasked?: string | null;
+  assignedMechanicLocation?: GeoLocation | null;
   dispatchBatch: number;
   searchRadiusKm: number;
   createdAt: number;
   updatedAt: number;
-  completedAt?: number;
-  cancelledAt?: number;
-  cancellationReason?: string;
-  cancelledBy?: string;
+  completedAt?: number | null;
+  cancelledAt?: number | null;
+  cancelledBy?: string | null;
+  cancellationReason?: string | null;
 }
 
 export interface JobOffer {
@@ -121,10 +121,17 @@ export interface JobOffer {
   mechanicId: string;
   mechanicName?: string;
   distanceKm: number;
+  vehicleType?: VehicleType;
+  vehicleMakeModel?: string;
+  serviceCategory?: string;
+  issueTitle?: string;
+  locality?: string;
+  estimatedPriceInr?: number;
   status: JobOfferStatus;
   offeredAt: number;
   expiresAt: number;
-  respondedAt?: number;
+  respondedAt?: number | null;
+  rejectionReason?: string | null;
 }
 
 export interface JobAssignment {
@@ -132,15 +139,22 @@ export interface JobAssignment {
   requestId: string;
   mechanicId: string;
   customerId: string;
+  customerDisplayName?: string;
+  customerPhoneMasked?: string;
+  vehicleType?: VehicleType;
+  vehicleMakeModel?: string;
+  vehicleRegNumber?: string;
+  serviceCategory?: string;
+  issueTitle?: string;
+  estimatedPriceInr?: number;
   assignedAt: number;
   initialAcceptedAt?: number;
-  completedAt?: number;
 }
 
 export interface JobStatusEvent {
   id: string;
   requestId: string;
-  fromStatus: ServiceRequestStatus;
+  fromStatus: ServiceRequestStatus | "NONE";
   toStatus: ServiceRequestStatus;
   actorId: string;
   actorRole: UserRole | "SYSTEM";
@@ -149,14 +163,14 @@ export interface JobStatusEvent {
 }
 
 export interface JobChat {
-  id: string; // equals requestId
+  id: string;
   requestId: string;
   customerId: string;
   mechanicId: string;
-  status: JobChatStatus;
+  status: "OPEN" | "CLOSED";
   createdAt: number;
-  closedAt?: number;
-  closedReason?: string;
+  closedAt?: number | null;
+  closedReason?: string | null;
 }
 
 export interface JobMessage {
@@ -165,36 +179,6 @@ export interface JobMessage {
   senderId: string;
   senderRole: UserRole;
   text: string;
-  timestamp: number;
-}
-
-export interface RatingRecord {
-  id: string;
-  requestId: string;
-  customerId: string;
-  mechanicId: string;
-  score: number;
-  feedback?: string;
-  createdAt: number;
-}
-
-export interface DeviceTokenRecord {
-  id: string;
-  userId: string;
-  role: UserRole;
-  token: string;
-  platform: "android" | "web" | "ios";
-  updatedAt: number;
-}
-
-export interface AdminAuditLog {
-  id: string;
-  adminId: string;
-  adminEmail?: string;
-  action: string;
-  targetType: "MECHANIC" | "SERVICE_REQUEST" | "SYSTEM_CONFIG" | "SERVICE_AREA";
-  targetId: string;
-  details: Record<string, unknown>;
   timestamp: number;
 }
 
@@ -209,4 +193,29 @@ export interface ApplicationConfig {
   localityCenter: { lat: number; lng: number };
   maxMechanicLocationStalenessMinutes: number;
   chatAutoCloseOnCompletion: boolean;
+}
+
+export interface CsvMechanicRow {
+  name: string;
+  phone: string;
+  email?: string;
+  vehicleTypes?: string;
+  serviceCategories?: string;
+  locality?: string;
+  lat?: string | number;
+  lng?: string | number;
+}
+
+export interface CsvValidationResult {
+  totalRows: number;
+  validRows: Array<{
+    rowIndex: number;
+    data: Partial<MechanicProfile>;
+  }>;
+  invalidRows: Array<{
+    rowIndex: number;
+    raw: CsvMechanicRow;
+    errors: string[];
+  }>;
+  duplicateCount: number;
 }
